@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"sync"
 
 	"github.com/tgdrive/vfscache-proxy/backend/link"
 
@@ -51,7 +52,9 @@ type Options struct {
 }
 
 type Handler struct {
-	VFS *vfs.VFS
+	VFS       *vfs.VFS
+	hashCache map[string]string
+	mu        sync.RWMutex
 }
 
 func NewHandler(opt Options) (*Handler, error) {
@@ -112,7 +115,7 @@ func NewHandler(opt Options) (*Handler, error) {
 	_ = config.SetCacheDir(actualCacheDir)
 
 	vfsInstance := vfs.New(f, &vfsOpt)
-	return &Handler{VFS: vfsInstance}, nil
+	return &Handler{VFS: vfsInstance, hashCache: make(map[string]string)}, nil
 }
 
 func (h *Handler) Shutdown() {
@@ -125,11 +128,35 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string
 		return
 	}
 
-	hashBytes := md5.Sum([]byte(targetURL))
-	fileHash := fmt.Sprintf("%x", hashBytes)
-	link.Register(fileHash, targetURL)
+	fileHash := h.getFileHash(targetURL)
+
+	// Only register if not already present to avoid redundant map operations
+	if _, exists := link.Load(fileHash); !exists {
+		link.Register(fileHash, targetURL)
+	}
 
 	h.ServeFile(w, r, fileHash)
+}
+
+func (h *Handler) getFileHash(targetURL string) string {
+	// Check cache first
+	h.mu.RLock()
+	fileHash, exists := h.hashCache[targetURL]
+	h.mu.RUnlock()
+
+	if exists {
+		return fileHash
+	}
+
+	// Compute hash and cache it
+	hashBytes := md5.Sum([]byte(targetURL))
+	fileHash = fmt.Sprintf("%x", hashBytes)
+
+	h.mu.Lock()
+	h.hashCache[targetURL] = fileHash
+	h.mu.Unlock()
+
+	return fileHash
 }
 
 func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request, remote string) {

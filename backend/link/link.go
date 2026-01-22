@@ -54,6 +54,14 @@ func Register(remote, url string) {
 	urlMap.Store(remote, url)
 }
 
+func Load(remote string) (string, bool) {
+	val, ok := urlMap.Load(remote)
+	if !ok {
+		return "", false
+	}
+	return val.(string), true
+}
+
 func init() {
 	fs.Register(&fs.RegInfo{
 		Name:        "link",
@@ -89,6 +97,8 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		var s fs.SizeSuffix
 		s.Set(val)
 		f.cache = freecache.NewCache(int(s))
+	} else {
+		f.cache = freecache.NewCache(5 * 1024 * 1024)
 	}
 
 	f.features = (&fs.Features{
@@ -137,6 +147,8 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 			if f.stripDomain {
 				parsedURL.Scheme = ""
 				parsedURL.Host = ""
+				parsedURL.User = nil
+				parsedURL.Fragment = ""
 			}
 			keyURL = parsedURL.String()
 		}
@@ -145,16 +157,18 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	keyHash := md5.Sum([]byte(keyURL))
 	cacheKey := keyHash[:]
 
-	if val, err := f.cache.Get(cacheKey); err == nil && len(val) == 16 {
-		size := int64(binary.LittleEndian.Uint64(val[:8]))
-		modTime := time.Unix(0, int64(binary.LittleEndian.Uint64(val[8:])))
-		return &Object{
-			fs:      f,
-			remote:  remote,
-			url:     u,
-			size:    size,
-			modTime: modTime,
-		}, nil
+	if f.cache != nil {
+		if val, err := f.cache.Get(cacheKey); err == nil && len(val) == 16 {
+			size := int64(binary.LittleEndian.Uint64(val[:8]))
+			modTime := time.Unix(0, int64(binary.LittleEndian.Uint64(val[8:])))
+			return &Object{
+				fs:      f,
+				remote:  remote,
+				url:     u,
+				size:    size,
+				modTime: modTime,
+			}, nil
+		}
 	}
 
 	client := fshttp.NewClient(ctx)
@@ -234,7 +248,9 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	buf := make([]byte, 16)
 	binary.LittleEndian.PutUint64(buf[:8], uint64(size))
 	binary.LittleEndian.PutUint64(buf[8:], uint64(modTime.UnixNano()))
-	f.cache.Set(cacheKey, buf, 3600)
+	if f.cache != nil {
+		f.cache.Set(cacheKey, buf, 3600)
+	}
 
 	return &Object{
 		fs:      f,

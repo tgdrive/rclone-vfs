@@ -121,6 +121,15 @@ func (v *VFS) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.H
 	}
 	fullURL += r.URL.Path
 
+	defer func() {
+		if r := recover(); r != nil {
+			if v.logger != nil {
+				v.logger.Error("panic in ServeHTTP", zap.Any("panic", r))
+			}
+			http.Error(w, fmt.Sprintf("Internal error: %v", r), http.StatusInternalServerError)
+		}
+	}()
+
 	v.handler.Serve(w, r, fullURL)
 	return nil
 }
