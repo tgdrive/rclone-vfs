@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -55,6 +56,9 @@ type Handler struct {
 	VFS       *vfs.VFS
 	hashCache map[string]string
 	mu        sync.RWMutex
+
+	stripQuery  bool
+	stripDomain bool
 }
 
 func NewHandler(opt Options) (*Handler, error) {
@@ -115,7 +119,12 @@ func NewHandler(opt Options) (*Handler, error) {
 	_ = config.SetCacheDir(actualCacheDir)
 
 	vfsInstance := vfs.New(f, &vfsOpt)
-	return &Handler{VFS: vfsInstance, hashCache: make(map[string]string)}, nil
+	return &Handler{
+		VFS:         vfsInstance,
+		hashCache:   make(map[string]string),
+		stripQuery:  opt.StripQuery,
+		stripDomain: opt.StripDomain,
+	}, nil
 }
 
 func (h *Handler) Shutdown() {
@@ -139,7 +148,6 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string
 }
 
 func (h *Handler) getFileHash(targetURL string) string {
-	// Check cache first
 	h.mu.RLock()
 	fileHash, exists := h.hashCache[targetURL]
 	h.mu.RUnlock()
@@ -148,8 +156,24 @@ func (h *Handler) getFileHash(targetURL string) string {
 		return fileHash
 	}
 
-	// Compute hash and cache it
-	hashBytes := md5.Sum([]byte(targetURL))
+	// Apply stripping to the URL before hashing
+	keyURL := targetURL
+	if h.stripQuery || h.stripDomain {
+		if parsedURL, err := url.Parse(targetURL); err == nil {
+			if h.stripQuery {
+				parsedURL.RawQuery = ""
+			}
+			if h.stripDomain {
+				parsedURL.Scheme = ""
+				parsedURL.Host = ""
+				parsedURL.User = nil
+				parsedURL.Fragment = ""
+			}
+			keyURL = parsedURL.String()
+		}
+	}
+
+	hashBytes := md5.Sum([]byte(keyURL))
 	fileHash = fmt.Sprintf("%x", hashBytes)
 
 	h.mu.Lock()

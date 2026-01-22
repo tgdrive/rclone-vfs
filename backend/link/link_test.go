@@ -1,138 +1,103 @@
 package link
 
 import (
-	"net/url"
+	"context"
 	"testing"
+
+	"github.com/rclone/rclone/fs/config/configmap"
 )
 
-func TestStripQueryAndDomain(t *testing.T) {
+func TestStripFlagsInBackend(t *testing.T) {
 	tests := []struct {
-		name        string
-		inputURL    string
-		stripQuery  bool
-		stripDomain bool
-		expected    string
+		name              string
+		opts              configmap.Simple
+		inputURL          string
+		expectStrippedURL string
 	}{
 		{
-			name:        "strip_query only",
-			inputURL:    "https://example.com/file.txt?param1=value1&param2=value2",
-			stripQuery:  true,
-			stripDomain: false,
-			expected:    "https://example.com/file.txt",
+			name: "no stripping",
+			opts: configmap.Simple{
+				"strip_query":  "false",
+				"strip_domain": "false",
+			},
+			inputURL:          "https://example.com/file.txt?param=value",
+			expectStrippedURL: "https://example.com/file.txt?param=value",
 		},
 		{
-			name:        "strip_domain only",
-			inputURL:    "https://example.com/file.txt?param1=value1",
-			stripQuery:  false,
-			stripDomain: true,
-			expected:    "/file.txt?param1=value1",
+			name: "strip_query only",
+			opts: configmap.Simple{
+				"strip_query":  "true",
+				"strip_domain": "false",
+			},
+			inputURL:          "https://example.com/file.txt?param=value",
+			expectStrippedURL: "https://example.com/file.txt",
 		},
 		{
-			name:        "strip both query and domain",
-			inputURL:    "https://example.com/file.txt?param1=value1",
-			stripQuery:  true,
-			stripDomain: true,
-			expected:    "/file.txt",
+			name: "strip_domain only",
+			opts: configmap.Simple{
+				"strip_query":  "false",
+				"strip_domain": "true",
+			},
+			inputURL:          "https://example.com/file.txt?param=value",
+			expectStrippedURL: "/file.txt?param=value",
 		},
 		{
-			name:        "no stripping",
-			inputURL:    "https://example.com/file.txt?param1=value1",
-			stripQuery:  false,
-			stripDomain: false,
-			expected:    "https://example.com/file.txt?param1=value1",
+			name: "strip both",
+			opts: configmap.Simple{
+				"strip_query":  "true",
+				"strip_domain": "true",
+			},
+			inputURL:          "https://example.com/file.txt?param=value",
+			expectStrippedURL: "/file.txt",
 		},
 		{
-			name:        "URL with port",
-			inputURL:    "https://example.com:8080/file.txt?param1=value1",
-			stripQuery:  false,
-			stripDomain: true,
-			expected:    "/file.txt?param1=value1",
+			name: "strip both with user info and fragment",
+			opts: configmap.Simple{
+				"strip_query":  "true",
+				"strip_domain": "true",
+			},
+			inputURL:          "https://user:pass@example.com/file.txt?param=value#section",
+			expectStrippedURL: "/file.txt",
 		},
 		{
-			name:        "URL with path and port strip both",
-			inputURL:    "https://example.com:8080/path/to/file.txt?param=value",
-			stripQuery:  true,
-			stripDomain: true,
-			expected:    "/path/to/file.txt",
-		},
-		{
-			name:        "relative URL with query",
-			inputURL:    "/path/to/file.txt?param=value",
-			stripQuery:  true,
-			stripDomain: true,
-			expected:    "/path/to/file.txt",
-		},
-		{
-			name:        "URL without scheme",
-			inputURL:    "example.com/file.txt?param=value",
-			stripQuery:  true,
-			stripDomain: true,
-			expected:    "example.com/file.txt",
-		},
-		{
-			name:        "just path",
-			inputURL:    "/file.txt",
-			stripQuery:  true,
-			stripDomain: true,
-			expected:    "/file.txt",
-		},
-		{
-			name:        "URL with user info",
-			inputURL:    "https://user:pass@example.com/file.txt",
-			stripQuery:  true,
-			stripDomain: true,
-			expected:    "/file.txt",
-		},
-		{
-			name:        "URL with hash fragment",
-			inputURL:    "https://example.com/file.txt#section",
-			stripQuery:  true,
-			stripDomain: true,
-			expected:    "/file.txt",
-		},
-		{
-			name:        "strip_query preserves fragment",
-			inputURL:    "https://example.com/file.txt#section",
-			stripQuery:  true,
-			stripDomain: false,
-			expected:    "https://example.com/file.txt#section",
-		},
-		{
-			name:        "URL with user info strip_domain only",
-			inputURL:    "https://user:pass@example.com/file.txt",
-			stripQuery:  false,
-			stripDomain: true,
-			expected:    "/file.txt",
+			name: "strip_query preserves fragment",
+			opts: configmap.Simple{
+				"strip_query":  "true",
+				"strip_domain": "false",
+			},
+			inputURL:          "https://example.com/file.txt#section",
+			expectStrippedURL: "https://example.com/file.txt#section",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := stripURL(tt.inputURL, tt.stripQuery, tt.stripDomain)
-			if result != tt.expected {
-				t.Errorf("stripURL() = %q, want %q", result, tt.expected)
+			f, err := NewFs(context.Background(), "test", "", tt.opts)
+			if err != nil {
+				t.Fatalf("NewFs failed: %v", err)
 			}
+
+			fs := f.(*Fs)
+
+			// Verify the flags were set correctly
+			if tt.opts["strip_query"] == "true" && !fs.stripQuery {
+				t.Error("stripQuery should be true")
+			}
+			if tt.opts["strip_query"] == "false" && fs.stripQuery {
+				t.Error("stripQuery should be false")
+			}
+			if tt.opts["strip_domain"] == "true" && !fs.stripDomain {
+				t.Error("stripDomain should be true")
+			}
+			if tt.opts["strip_domain"] == "false" && fs.stripDomain {
+				t.Error("stripDomain should be false")
+			}
+
+			// The actual stripping happens in NewObject which requires network
+			// So we just verify the flags were set correctly
+			t.Logf("Fs stripQuery=%v, stripDomain=%v", fs.stripQuery, fs.stripDomain)
 		})
 	}
-}
-
-func stripURL(u string, stripQuery, stripDomain bool) string {
-	keyURL := u
-	if stripQuery || stripDomain {
-		if parsedURL, err := url.Parse(u); err == nil {
-			if stripQuery {
-				parsedURL.RawQuery = ""
-			}
-			if stripDomain {
-				parsedURL.Scheme = ""
-				parsedURL.Host = ""
-				parsedURL.User = nil
-				parsedURL.Fragment = ""
-			}
-			keyURL = parsedURL.String()
-		}
-	}
-	return keyURL
 }
 
 func TestRegisterAndLoad(t *testing.T) {

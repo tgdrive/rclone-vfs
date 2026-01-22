@@ -183,3 +183,135 @@ func TestRegisterOptimization(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	handler.Serve(w2, req2, testURL)
 }
+
+func TestStripQueryHashDeduplication(t *testing.T) {
+	opt := Options{
+		FsName:       "link-test",
+		CacheDir:     "",
+		CacheMode:    "full",
+		DirCacheTime: "0s",
+		StripQuery:   true,
+	}
+
+	handler, err := NewHandler(opt)
+	if err != nil {
+		t.Fatalf("Failed to create handler: %v", err)
+	}
+	defer handler.Shutdown()
+
+	url1 := "https://example.com/file.txt?token=abc"
+	url2 := "https://example.com/file.txt?token=xyz"
+	url3 := "https://example.com/file.txt?expires=123456"
+
+	hash1 := handler.getFileHash(url1)
+	hash2 := handler.getFileHash(url2)
+	hash3 := handler.getFileHash(url3)
+
+	if hash1 != hash2 {
+		t.Errorf("hash1 != hash2: %s != %s", hash1, hash2)
+	}
+	if hash2 != hash3 {
+		t.Errorf("hash2 != hash3: %s != %s", hash2, hash3)
+	}
+
+	t.Logf("All stripped URLs produce same hash: %s", hash1)
+}
+
+func TestStripDomainHashDeduplication(t *testing.T) {
+	opt := Options{
+		FsName:       "link-test",
+		CacheDir:     "",
+		CacheMode:    "full",
+		DirCacheTime: "0s",
+		StripDomain:  true,
+	}
+
+	handler, err := NewHandler(opt)
+	if err != nil {
+		t.Fatalf("Failed to create handler: %v", err)
+	}
+	defer handler.Shutdown()
+
+	url1 := "https://domain1.com/file.txt"
+	url2 := "https://domain2.com/file.txt"
+	url3 := "https://domain3.com/another.txt"
+
+	hash1 := handler.getFileHash(url1)
+	hash2 := handler.getFileHash(url2)
+	hash3 := handler.getFileHash(url3)
+
+	if hash1 != hash2 {
+		t.Errorf("hash1 != hash2: %s != %s", hash1, hash2)
+	}
+	if hash2 == hash3 {
+		t.Errorf("hash2 should != hash3 (different paths): %s == %s", hash2, hash3)
+	}
+
+	t.Logf("Same path, different domains produce same hash: %s", hash1)
+}
+
+func TestNoStripDifferentHashes(t *testing.T) {
+	opt := Options{
+		FsName:       "link-test",
+		CacheDir:     "",
+		CacheMode:    "full",
+		DirCacheTime: "0s",
+		StripQuery:   false,
+		StripDomain:  false,
+	}
+
+	handler, err := NewHandler(opt)
+	if err != nil {
+		t.Fatalf("Failed to create handler: %v", err)
+	}
+	defer handler.Shutdown()
+
+	url1 := "https://example.com/file.txt?token=abc"
+	url2 := "https://example.com/file.txt?token=xyz"
+	url3 := "https://other.com/file.txt"
+
+	hash1 := handler.getFileHash(url1)
+	hash2 := handler.getFileHash(url2)
+	hash3 := handler.getFileHash(url3)
+
+	if hash1 == hash2 {
+		t.Errorf("hash1 should != hash2 without strip_query: %s == %s", hash1, hash2)
+	}
+	if hash1 == hash3 {
+		t.Errorf("hash1 should != hash3 without strip_domain: %s == %s", hash1, hash3)
+	}
+}
+
+func TestStripBothDeduplication(t *testing.T) {
+	opt := Options{
+		FsName:       "link-test",
+		CacheDir:     "",
+		CacheMode:    "full",
+		DirCacheTime: "0s",
+		StripQuery:   true,
+		StripDomain:  true,
+	}
+
+	handler, err := NewHandler(opt)
+	if err != nil {
+		t.Fatalf("Failed to create handler: %v", err)
+	}
+	defer handler.Shutdown()
+
+	url1 := "https://domain1.com/file.txt?token=abc"
+	url2 := "https://domain2.com/file.txt?token=xyz"
+	url3 := "https://domain3.com/another.txt?param=value"
+
+	hash1 := handler.getFileHash(url1)
+	hash2 := handler.getFileHash(url2)
+	hash3 := handler.getFileHash(url3)
+
+	if hash1 != hash2 {
+		t.Errorf("hash1 != hash2: %s != %s", hash1, hash2)
+	}
+	if hash2 == hash3 {
+		t.Errorf("hash2 should != hash3 (different paths): %s == %s", hash2, hash3)
+	}
+
+	t.Logf("Same path, different domains/tokens produce same hash: %s", hash1)
+}
