@@ -16,9 +16,34 @@ import (
 	"github.com/coocood/freecache"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/lib/pacer"
 )
+
+var retryErrorCodes = []int{
+	429, // Too Many Requests
+	500, // Internal Server Error
+	502, // Bad Gateway
+	503, // Service Unavailable
+	504, // Gateway Timeout
+	509, // Bandwidth Limit Exceeded
+}
+
+func shouldRetry(resp *http.Response, err error) (bool, error) {
+	if err != nil {
+		return fserrors.ShouldRetry(err), err
+	}
+	if resp != nil {
+		for _, code := range retryErrorCodes {
+			if resp.StatusCode == code {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
 
 var (
 	errorReadOnly = errors.New("link: read only")
@@ -44,12 +69,14 @@ type Fs struct {
 	stripQuery  bool
 	stripDomain bool
 	cache       *freecache.Cache
+	pacer       *fs.Pacer
 }
 
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	f := &Fs{
-		name: name,
-		root: root,
+		name:  name,
+		root:  root,
+		pacer: fs.NewPacer(ctx, pacer.NewDefault()),
 	}
 	// Parse backend options
 	if val, ok := m.Get("strip_query"); ok && val == "true" {
@@ -132,7 +159,9 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 	client := fshttp.NewClient(ctx)
 
-	// Create request with a common User-Agent
+	var resp *http.Response
+	var err error
+
 	newReq := func(method, urlStr string) (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, method, urlStr, nil)
 		if err != nil {
@@ -146,17 +175,25 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.Do(req)
+
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = client.Do(req)
+		retry, _ := shouldRetry(resp, err)
+		return retry, err
+	})
 
 	// Fallback to GET if HEAD is not allowed or supported, or if size is unknown (-1)
-	if err != nil || (resp.StatusCode != http.StatusOK) || resp.ContentLength < 0 {
+	if err != nil || (resp == nil || resp.StatusCode != http.StatusOK) || resp.ContentLength < 0 {
 		req, err = newReq("GET", u)
 		if err != nil {
 			return nil, err
 		}
-		// Try a slightly different range format that is more widely accepted
 		req.Header.Set("Range", "bytes=0-0")
-		resp, err = client.Do(req)
+		err = f.pacer.Call(func() (bool, error) {
+			resp, err = client.Do(req)
+			retry, _ := shouldRetry(resp, err)
+			return retry, err
+		})
 		if err != nil {
 			log.Printf("GET range failed for %s: %v", remote, err)
 			return nil, err
@@ -197,7 +234,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	buf := make([]byte, 16)
 	binary.LittleEndian.PutUint64(buf[:8], uint64(size))
 	binary.LittleEndian.PutUint64(buf[8:], uint64(modTime.UnixNano()))
-	f.cache.Set(cacheKey, buf, 3600) // 1 hour expirationhour expiration
+	f.cache.Set(cacheKey, buf, 3600)
 
 	return &Object{
 		fs:      f,
@@ -249,7 +286,14 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	for k, v := range fs.OpenOptionHeaders(options) {
 		req.Header.Add(k, v)
 	}
-	resp, err := client.Do(req)
+
+	var resp *http.Response
+	err = o.fs.pacer.Call(func() (bool, error) {
+		resp, err = client.Do(req)
+		retry, _ := shouldRetry(resp, err)
+		return retry, err
+	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +301,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 		resp.Body.Close()
 		return nil, fmt.Errorf("GET failed: %s (status %d)", resp.Status, resp.StatusCode)
 	}
+
 	return resp.Body, nil
 }
 
