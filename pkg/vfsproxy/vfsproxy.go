@@ -21,11 +21,11 @@ import (
 	"github.com/rclone/rclone/vfs"
 	"github.com/rclone/rclone/vfs/vfscommon"
 	"github.com/spf13/pflag"
-	"github.com/tgdrive/vfscache-proxy/backend/link"
+	"github.com/tgdrive/rclone-vfs/backend/link"
 )
 
 type Options struct {
-	FsName            string `vfs:"-" flag:"fs-name" caddy:"fs_name" help:"The name of the VFS file system"`
+	FsName            string `vfs:"-" flag:"fs-name" caddy:"fs_name" help:"The name of the VFS file system" default:"rclone-vfs"`
 	CacheDir          string `vfs:"-" flag:"cache-dir" caddy:"cache_dir" help:"Cache directory"`
 	CacheMaxAge       string `vfs:"vfs_cache_max_age" flag:"max-age" caddy:"max_age" help:"Max age of files in cache"`
 	CacheMaxSize      string `vfs:"vfs_cache_max_size" flag:"max-size" caddy:"max_size" help:"Max total size of objects in cache"`
@@ -33,7 +33,7 @@ type Options struct {
 	CacheChunkStreams int    `vfs:"vfs_read_chunk_streams" flag:"chunk-streams" caddy:"chunk_streams" help:"The number of parallel streams to read at once"`
 	StripQuery        bool   `vfs:"-" flag:"strip-query" caddy:"strip_query" help:"Strip query parameters from URL for caching"`
 	StripDomain       bool   `vfs:"-" flag:"strip-domain" caddy:"strip_domain" help:"Strip domain and protocol from URL for caching"`
-	ShardLevel        int    `vfs:"-" flag:"shard-level" caddy:"shard-level" help:"Number of shard levels"`
+	ShardLevel        int    `vfs:"-" flag:"shard-level" caddy:"shard-level" help:"Number of shard levels" default:"1"`
 
 	// Additional VFS Options
 	CacheMode         string `vfs:"vfs_cache_mode" flag:"cache-mode" caddy:"cache_mode" help:"VFS cache mode (off, minimal, writes, full)"`
@@ -99,21 +99,38 @@ func (opt *Options) ToConfigMap() configmap.Simple {
 	return m
 }
 
-// DefaultOptions returns Options with sensible defaults applied from rclone.
+// DefaultOptions returns Options with sensible defaults applied from rclone and tags.
 func DefaultOptions() Options {
-	opt := Options{
-		FsName:     "link-vfs",
-		ShardLevel: 1,
+	var opt Options
+	optValue := reflect.ValueOf(&opt).Elem()
+	optType := optValue.Type()
+
+	// 1. Apply defaults from tags first
+	for i := 0; i < optType.NumField(); i++ {
+		field := optType.Field(i)
+		def := field.Tag.Get("default")
+		if def == "" {
+			continue
+		}
+		f := optValue.Field(i)
+		switch f.Kind() {
+		case reflect.String:
+			f.SetString(def)
+		case reflect.Int:
+			if val, err := strconv.Atoi(def); err == nil {
+				f.SetInt(int64(val))
+			}
+		case reflect.Bool:
+			f.SetBool(def == "true")
+		}
 	}
 
+	// 2. Fetch/Override defaults from rclone vfscommon.Opt
 	vfsOpt := vfscommon.Opt
 	items, err := configstruct.Items(&vfsOpt)
 	if err != nil {
 		return opt
 	}
-
-	optValue := reflect.ValueOf(&opt).Elem()
-	optType := optValue.Type()
 
 	for _, item := range items {
 		valStr, _ := configstruct.InterfaceToString(item.Value)

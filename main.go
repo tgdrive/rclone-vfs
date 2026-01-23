@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tgdrive/vfscache-proxy/pkg/vfsproxy"
+	"github.com/tgdrive/rclone-vfs/pkg/vfsproxy"
 
 	"github.com/rclone/rclone/fs/config"
 	"github.com/spf13/pflag"

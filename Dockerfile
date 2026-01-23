@@ -4,6 +4,6 @@ RUN apk add --no-cache ca-certificates tzdata
 
 ARG TARGETPLATFORM
 
-COPY $TARGETPLATFORM/vfscache_proxy /vfscache_proxy
+COPY $TARGETPLATFORM/rclone-vfs /rclone-vfs
 
-CMD ["/vfscache_proxy"]
+CMD ["/rclone-vfs"]

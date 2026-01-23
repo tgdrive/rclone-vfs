@@ -1,10 +1,11 @@
 version: 2
-project_name: vfscache_proxy
+project_name: rclone-vfs
 
 builds:
   - env:
       - CGO_ENABLED=0
     main: main.go
+    binary: rclone-vfs
     flags: -trimpath
     ldflags:
       - -s -w

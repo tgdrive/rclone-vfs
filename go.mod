@@ -1,4 +1,4 @@
-module github.com/tgdrive/vfscache-proxy
+module github.com/tgdrive/rclone-vfs
 
 go 1.25.6
 
