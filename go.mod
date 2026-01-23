@@ -4,7 +4,6 @@ go 1.25.6
 
 require (
 	github.com/caddyserver/caddy/v2 v2.10.2
-	github.com/coocood/freecache v1.2.4
 	github.com/rclone/rclone v1.72.1
 	github.com/spf13/pflag v1.0.10
 	go.uber.org/zap v1.27.0

@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/tgdrive/vfscache-proxy/backend/link"
-
 	_ "github.com/rclone/rclone/backend/local"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
@@ -21,6 +19,7 @@ import (
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/vfs"
 	"github.com/rclone/rclone/vfs/vfscommon"
+	"github.com/tgdrive/vfscache-proxy/backend/link"
 )
 
 type Options struct {
@@ -32,7 +31,7 @@ type Options struct {
 	CacheChunkStreams int
 	StripQuery        bool
 	StripDomain       bool
-	MetadataCacheSize string
+	ShardLevel        int
 
 	// Additional VFS Options
 	CacheMode         string
@@ -51,71 +50,131 @@ type Options struct {
 	FilePerms         string
 }
 
-type Handler struct {
-	VFS       *vfs.VFS
-	hashCache map[string]string
-	mu        sync.RWMutex
+// DefaultOptions returns Options with sensible defaults applied from rclone.
+func DefaultOptions() Options {
+	opt := Options{
+		FsName:     "link-vfs",
+		ShardLevel: 1,
+	}
 
+	// Fetch defaults from rclone vfscommon.Opt
+	vfsOpt := vfscommon.Opt
+	items, err := configstruct.Items(&vfsOpt)
+	if err != nil {
+		return opt // Fallback to minimal defaults on error
+	}
+
+	for _, item := range items {
+		valStr, _ := configstruct.InterfaceToString(item.Value)
+		switch item.Name {
+		case "vfs_cache_mode":
+			opt.CacheMode = valStr
+		case "vfs_cache_max_age":
+			opt.CacheMaxAge = valStr
+		case "vfs_cache_max_size":
+			opt.CacheMaxSize = valStr
+		case "vfs_read_chunk_size":
+			opt.CacheChunkSize = valStr
+		case "vfs_read_chunk_streams":
+			if i, err := strconv.Atoi(valStr); err == nil {
+				opt.CacheChunkStreams = i
+			}
+		case "vfs_write_wait":
+			opt.WriteWait = valStr
+		case "vfs_read_wait":
+			opt.ReadWait = valStr
+		case "vfs_write_back":
+			opt.WriteBack = valStr
+		case "dir_cache_time":
+			opt.DirCacheTime = valStr
+		case "vfs_fast_fingerprint":
+			opt.FastFingerprint = (valStr == "true")
+		case "vfs_cache_min_free_space":
+			opt.CacheMinFreeSpace = valStr
+		case "vfs_case_insensitive":
+			opt.CaseInsensitive = (valStr == "true")
+		case "read_only":
+			opt.ReadOnly = (valStr == "true")
+		case "no_modtime":
+			opt.NoModTime = (valStr == "true")
+		case "no_checksum":
+			opt.NoChecksum = (valStr == "true")
+		case "no_seek":
+			opt.NoSeek = (valStr == "true")
+		case "dir_perms":
+			opt.DirPerms = valStr
+		case "file_perms":
+			opt.FilePerms = valStr
+		}
+	}
+
+	return opt
+}
+
+type Handler struct {
+	VFS         *vfs.VFS
+	mu          sync.RWMutex
+	hashCache   map[string]string
 	stripQuery  bool
 	stripDomain bool
+	shardLevel  int
 }
 
 func NewHandler(opt Options) (*Handler, error) {
-
-	regInfo, _ := fs.Find("link")
-	if regInfo == nil {
-		return nil, fmt.Errorf("could not find link backend")
-	}
-
-	backendOpt := configmap.Simple{
-		"strip_query":  fmt.Sprintf("%v", opt.StripQuery),
-		"strip_domain": fmt.Sprintf("%v", opt.StripDomain),
-		"cache_size":   fmt.Sprintf("%v", opt.MetadataCacheSize),
-	}
-
-	f, err := regInfo.NewFs(context.Background(), opt.FsName, "", backendOpt)
-	if err != nil {
-		return nil, err
-	}
+	ctx := context.Background()
 
 	m := configmap.Simple{
+		"type":         "link",
+		"strip_query":  strconv.FormatBool(opt.StripQuery),
+		"strip_domain": strconv.FormatBool(opt.StripDomain),
+		"shard_level":  strconv.Itoa(opt.ShardLevel),
+	}
+
+	// Create a new file system for the link backend
+	f, err := fs.NewFs(ctx, opt.FsName+":")
+	if err != nil {
+		// Fallback to manual creation if not in rclone config
+		f, err = link.NewFs(ctx, opt.FsName, "", m)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create link backend: %w", err)
+		}
+	}
+
+	// Configure VFS options
+	vfsOpt := vfscommon.Opt
+	optMap := configmap.Simple{
 		"vfs_cache_mode":           opt.CacheMode,
 		"vfs_cache_max_age":        opt.CacheMaxAge,
 		"vfs_cache_max_size":       opt.CacheMaxSize,
 		"vfs_read_chunk_size":      opt.CacheChunkSize,
-		"dir_cache_time":           opt.DirCacheTime,
-		"vfs_read_chunk_streams":   fmt.Sprintf("%d", opt.CacheChunkStreams),
+		"vfs_read_chunk_streams":   strconv.Itoa(opt.CacheChunkStreams),
 		"vfs_write_wait":           opt.WriteWait,
 		"vfs_read_wait":            opt.ReadWait,
 		"vfs_write_back":           opt.WriteBack,
-		"vfs_fast_fingerprint":     fmt.Sprintf("%v", opt.FastFingerprint),
+		"dir_cache_time":           opt.DirCacheTime,
+		"vfs_fast_fingerprint":     strconv.FormatBool(opt.FastFingerprint),
 		"vfs_cache_min_free_space": opt.CacheMinFreeSpace,
-		"vfs_case_insensitive":     fmt.Sprintf("%v", opt.CaseInsensitive),
-		"read_only":                fmt.Sprintf("%v", opt.ReadOnly),
-		"no_modtime":               fmt.Sprintf("%v", opt.NoModTime),
-		"no_checksum":              fmt.Sprintf("%v", opt.NoChecksum),
-		"no_seek":                  fmt.Sprintf("%v", opt.NoSeek),
+		"vfs_case_insensitive":     strconv.FormatBool(opt.CaseInsensitive),
+		"read_only":                strconv.FormatBool(opt.ReadOnly),
+		"no_modtime":               strconv.FormatBool(opt.NoModTime),
+		"no_checksum":              strconv.FormatBool(opt.NoChecksum),
+		"no_seek":                  strconv.FormatBool(opt.NoSeek),
 		"dir_perms":                opt.DirPerms,
 		"file_perms":               opt.FilePerms,
 	}
 
-	if m["vfs_cache_mode"] == "" {
-		m["vfs_cache_mode"] = "full"
-	}
-	if m["dir_cache_time"] == "" {
-		m["dir_cache_time"] = "0s"
-	}
-
-	vfsOpt := vfscommon.Opt
-	if err := configstruct.Set(m, &vfsOpt); err != nil {
+	if err := configstruct.Set(optMap, &vfsOpt); err != nil {
 		return nil, fmt.Errorf("failed to parse VFS options: %w", err)
 	}
+	vfsOpt.Init() // Initialize options (sets up permissions, etc.)
 
 	actualCacheDir := opt.CacheDir
 	if actualCacheDir == "" {
 		actualCacheDir = filepath.Join(os.TempDir(), "rclone_vfs_cache")
 	}
-	_ = config.SetCacheDir(actualCacheDir)
+	if err := config.SetCacheDir(actualCacheDir); err != nil {
+		return nil, fmt.Errorf("failed to set cache directory: %w", err)
+	}
 
 	vfsInstance := vfs.New(f, &vfsOpt)
 	return &Handler{
@@ -123,27 +182,12 @@ func NewHandler(opt Options) (*Handler, error) {
 		hashCache:   make(map[string]string),
 		stripQuery:  opt.StripQuery,
 		stripDomain: opt.StripDomain,
+		shardLevel:  opt.ShardLevel,
 	}, nil
 }
 
 func (h *Handler) Shutdown() {
 	h.VFS.Shutdown()
-}
-
-func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string) {
-	if targetURL == "" {
-		http.Error(w, "Target URL is required", http.StatusBadRequest)
-		return
-	}
-
-	fileHash := h.getFileHash(targetURL)
-
-	// Only register if not already present to avoid redundant map operations
-	if _, exists := link.Load(fileHash); !exists {
-		link.Register(fileHash, targetURL, r.Header)
-	}
-
-	h.ServeFile(w, r, fileHash)
 }
 
 func (h *Handler) getFileHash(targetURL string) string {
@@ -159,13 +203,31 @@ func (h *Handler) getFileHash(targetURL string) string {
 	keyURL := link.StripURL(targetURL, h.stripQuery, h.stripDomain)
 
 	hashBytes := md5.Sum([]byte(keyURL))
-	fileHash = fmt.Sprintf("%x", hashBytes)
+	computedHash := fmt.Sprintf("%x", hashBytes)
 
+	// Double-checked locking to avoid duplicate computation
 	h.mu.Lock()
-	h.hashCache[targetURL] = fileHash
+	if fileHash, exists = h.hashCache[targetURL]; exists {
+		h.mu.Unlock()
+		return fileHash
+	}
+	h.hashCache[targetURL] = computedHash
 	h.mu.Unlock()
 
-	return fileHash
+	return computedHash
+}
+
+func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string) {
+	if targetURL == "" {
+		http.Error(w, "Target URL is required", http.StatusBadRequest)
+		return
+	}
+
+	fileHash := h.getFileHash(targetURL)
+
+	link.Register(fileHash, targetURL, r.Header.Clone())
+
+	h.ServeFile(w, r, link.ShardedPath(fileHash, h.shardLevel))
 }
 
 func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request, remote string) {
@@ -202,7 +264,6 @@ func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request, remote strin
 	} else {
 		w.Header().Set("Content-Type", mimeType)
 	}
-
 	w.Header().Set("Last-Modified", file.ModTime().UTC().Format(http.TimeFormat))
 
 	if r.Method == "HEAD" {
@@ -216,14 +277,11 @@ func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request, remote strin
 		return
 	}
 	defer func() {
-		err := in.Close()
-		if err != nil {
-			fs.Errorf(remote, "Failed to close file: %v", err)
-		}
+		_ = in.Close()
 	}()
 
 	if knownSize {
-		http.ServeContent(w, r, remote, node.ModTime(), in)
+		http.ServeContent(w, r, remote, file.ModTime(), in)
 	} else {
 		if rangeRequest := r.Header.Get("Range"); rangeRequest != "" {
 			http.Error(w, "Can't use Range: on files of unknown length", http.StatusRequestedRangeNotSatisfiable)

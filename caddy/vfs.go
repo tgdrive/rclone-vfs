@@ -1,10 +1,12 @@
 package vfs
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
+	"net/url"
+	"runtime/debug"
 	"strconv"
-	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -18,11 +20,21 @@ import (
 func init() {
 	caddy.RegisterModule(VFS{})
 	httpcaddyfile.RegisterHandlerDirective("vfs", parseCaddyfile)
+
+	// Register directive order so vfs runs before reverse_proxy
+	httpcaddyfile.RegisterDirectiveOrder("vfs", httpcaddyfile.Before, "reverse_proxy")
 }
 
 // VFS implements a Caddy HTTP handler that proxies requests to a VFS backend.
 type VFS struct {
-	Upstream          string `json:"upstream,omitempty"`
+	// Upstream is the base URL to proxy requests to (required).
+	Upstream string `json:"upstream,omitempty"`
+
+	// Passthrough controls whether to call the next handler on 404.
+	// If true, when a file is not found, the next handler in the chain is called.
+	// If false (default), a 404 response is returned immediately.
+	Passthrough bool `json:"passthrough,omitempty"`
+
 	FsName            string `json:"fs_name,omitempty"`
 	CacheDir          string `json:"cache_dir,omitempty"`
 	CacheMaxAge       string `json:"cache_max_age,omitempty"`
@@ -31,9 +43,9 @@ type VFS struct {
 	CacheChunkStreams int    `json:"cache_chunk_streams,omitempty"`
 	StripQuery        bool   `json:"strip_query,omitempty"`
 	StripDomain       bool   `json:"strip_domain,omitempty"`
-	MetadataCacheSize string `json:"metadata_cache_size,omitempty"`
+	ShardLevel        int    `json:"shard-level,omitempty"`
 
-	// New Options
+	// VFS Options
 	CacheMode         string `json:"cache_mode,omitempty"`
 	WriteWait         string `json:"write_wait,omitempty"`
 	ReadWait          string `json:"read_wait,omitempty"`
@@ -49,8 +61,9 @@ type VFS struct {
 	DirPerms          string `json:"dir_perms,omitempty"`
 	FilePerms         string `json:"file_perms,omitempty"`
 
-	handler *vfsproxy.Handler
-	logger  *zap.Logger
+	handler     *vfsproxy.Handler
+	logger      *zap.Logger
+	upstreamURL *url.URL
 }
 
 // CaddyModule returns the Caddy module information.
@@ -65,49 +78,119 @@ func (VFS) CaddyModule() caddy.ModuleInfo {
 func (v *VFS) Provision(ctx caddy.Context) error {
 	v.logger = ctx.Logger(v)
 
-	opt := vfsproxy.Options{
-		FsName:            v.FsName,
-		CacheDir:          v.CacheDir,
-		CacheMaxAge:       v.CacheMaxAge,
-		CacheMaxSize:      v.CacheMaxSize,
-		CacheChunkSize:    v.CacheChunkSize,
-		CacheChunkStreams: v.CacheChunkStreams,
-		StripQuery:        v.StripQuery,
-		StripDomain:       v.StripDomain,
-		MetadataCacheSize: v.MetadataCacheSize,
-		CacheMode:         v.CacheMode,
-		WriteWait:         v.WriteWait,
-		ReadWait:          v.ReadWait,
-		WriteBack:         v.WriteBack,
-		DirCacheTime:      v.DirCacheTime,
-		FastFingerprint:   v.FastFingerprint,
-		CacheMinFreeSpace: v.CacheMinFreeSpace,
-		CaseInsensitive:   v.CaseInsensitive,
-		ReadOnly:          v.ReadOnly,
-		NoModTime:         v.NoModTime,
-		NoChecksum:        v.NoChecksum,
-		NoSeek:            v.NoSeek,
-		DirPerms:          v.DirPerms,
-		FilePerms:         v.FilePerms,
+	// Parse upstream URL once during provisioning
+	parsedURL, err := url.Parse(v.Upstream)
+	if err != nil {
+		return fmt.Errorf("invalid upstream URL: %w", err)
 	}
+	v.upstreamURL = parsedURL
+
+	// Start with defaults and apply user overrides
+	opt := vfsproxy.DefaultOptions()
+
+	// Apply user-provided values (non-zero values override defaults)
+	if v.FsName != "" {
+		opt.FsName = v.FsName
+	}
+	if v.CacheDir != "" {
+		opt.CacheDir = v.CacheDir
+	}
+	if v.CacheMaxAge != "" {
+		opt.CacheMaxAge = v.CacheMaxAge
+	}
+	if v.CacheMaxSize != "" {
+		opt.CacheMaxSize = v.CacheMaxSize
+	}
+	if v.CacheChunkSize != "" {
+		opt.CacheChunkSize = v.CacheChunkSize
+	}
+	if v.CacheChunkStreams != 0 {
+		opt.CacheChunkStreams = v.CacheChunkStreams
+	}
+	if v.CacheMode != "" {
+		opt.CacheMode = v.CacheMode
+	}
+	if v.WriteWait != "" {
+		opt.WriteWait = v.WriteWait
+	}
+	if v.ReadWait != "" {
+		opt.ReadWait = v.ReadWait
+	}
+	if v.WriteBack != "" {
+		opt.WriteBack = v.WriteBack
+	}
+	if v.DirCacheTime != "" {
+		opt.DirCacheTime = v.DirCacheTime
+	}
+	if v.CacheMinFreeSpace != "" {
+		opt.CacheMinFreeSpace = v.CacheMinFreeSpace
+	}
+	if v.DirPerms != "" {
+		opt.DirPerms = v.DirPerms
+	}
+	if v.FilePerms != "" {
+		opt.FilePerms = v.FilePerms
+	}
+
+	// Boolean flags (always apply as they have meaning when true)
+	opt.StripQuery = v.StripQuery
+	opt.StripDomain = v.StripDomain
+	opt.FastFingerprint = v.FastFingerprint
+	opt.CaseInsensitive = v.CaseInsensitive
+	opt.ReadOnly = v.ReadOnly
+	opt.NoModTime = v.NoModTime
+	opt.NoChecksum = v.NoChecksum
+	opt.NoSeek = v.NoSeek
+	opt.ShardLevel = v.ShardLevel
 
 	handler, err := vfsproxy.NewHandler(opt)
 	if err != nil {
-		return fmt.Errorf("failed to create VFS handler: %v", err)
+		return fmt.Errorf("failed to create VFS handler: %w", err)
 	}
 
 	v.handler = handler
+	v.logger.Info("VFS handler provisioned",
+		zap.String("upstream", v.Upstream),
+		zap.String("cache_mode", opt.CacheMode),
+		zap.String("cache_dir", opt.CacheDir),
+	)
 	return nil
 }
 
 // Validate ensures the configuration is valid.
 func (v *VFS) Validate() error {
+	if v.Upstream == "" {
+		return fmt.Errorf("upstream URL is required")
+	}
+
+	// Validate upstream URL format
+	if v.upstreamURL == nil {
+		return fmt.Errorf("upstream URL was not parsed")
+	}
+	if v.upstreamURL.Scheme != "http" && v.upstreamURL.Scheme != "https" {
+		return fmt.Errorf("upstream URL must use http or https scheme, got %q", v.upstreamURL.Scheme)
+	}
+
+	// Validate cache_mode if provided
+	if v.CacheMode != "" {
+		validModes := map[string]bool{"off": true, "minimal": true, "writes": true, "full": true}
+		if !validModes[v.CacheMode] {
+			return fmt.Errorf("invalid cache_mode %q: must be one of off, minimal, writes, full", v.CacheMode)
+		}
+	}
+
+	// Validate chunk_streams if provided
+	if v.CacheChunkStreams < 0 {
+		return fmt.Errorf("chunk_streams must be non-negative, got %d", v.CacheChunkStreams)
+	}
+
 	return nil
 }
 
 // Cleanup cleans up the VFS resources.
 func (v *VFS) Cleanup() error {
 	if v.handler != nil {
+		v.logger.Info("Shutting down VFS handler")
 		v.handler.Shutdown()
 	}
 	return nil
@@ -115,38 +198,58 @@ func (v *VFS) Cleanup() error {
 
 // ServeHTTP serves the HTTP request.
 func (v *VFS) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	fullURL := v.Upstream
-	if !strings.HasSuffix(fullURL, "/") && !strings.HasPrefix(r.URL.Path, "/") {
-		fullURL += "/"
-	}
-	fullURL += r.URL.Path
+	// Build full URL using url.JoinPath for proper path handling
+	fullURL := v.upstreamURL.JoinPath(r.URL.Path).String()
 	if r.URL.RawQuery != "" {
 		fullURL += "?" + r.URL.RawQuery
 	}
 
+	// Wrap in panic recovery
 	defer func() {
-		if r := recover(); r != nil {
-			if v.logger != nil {
-				v.logger.Error("panic in ServeHTTP", zap.Any("panic", r))
-			}
-			http.Error(w, fmt.Sprintf("Internal error: %v", r), http.StatusInternalServerError)
+		if rec := recover(); rec != nil {
+			v.logger.Error("panic in ServeHTTP",
+				zap.Any("panic", rec),
+				zap.String("url", r.URL.String()),
+				zap.String("method", r.Method),
+				zap.String("stack", string(debug.Stack())),
+			)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	}()
+
+	// If passthrough is enabled, use Caddy's ResponseRecorder to buffer 404 responses
+	if v.Passthrough && next != nil {
+		buf := new(bytes.Buffer)
+		shouldBuffer := func(status int, header http.Header) bool {
+			return status == http.StatusNotFound
+		}
+		rec := caddyhttp.NewResponseRecorder(w, buf, shouldBuffer)
+		v.handler.Serve(rec, r, fullURL)
+		if rec.Buffered() {
+			return next.ServeHTTP(w, r)
+		}
+		return nil
+	}
 
 	v.handler.Serve(w, r, fullURL)
 	return nil
 }
 
 // parseCaddyfile parses the Caddyfile configuration.
+//
 // Syntax:
 //
 //	vfs <upstream> {
+//	    passthrough
 //	    cache_dir <path>
 //	    max_age <duration>
 //	    max_size <size>
 //	    chunk_size <size>
 //	    chunk_streams <number>
 //	    strip_query
+//	    strip_domain
+//	    cache_mode <off|minimal|writes|full>
+//	    ...
 //	}
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var v VFS
@@ -156,6 +259,15 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 
 // UnmarshalCaddyfile sets up the handler from Caddyfile tokens.
 func (v *VFS) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	// Helper for parsing string arguments
+	parseString := func(target *string) error {
+		if !d.NextArg() {
+			return d.ArgErr()
+		}
+		*target = d.Val()
+		return nil
+	}
+
 	for d.Next() {
 		if d.NextArg() {
 			v.Upstream = d.Val()
@@ -165,82 +277,68 @@ func (v *VFS) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		}
 
 		for d.NextBlock(0) {
-			switch d.Val() {
+			directive := d.Val()
+			var err error
+
+			switch directive {
+			// String options
 			case "fs_name":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.FsName = d.Val()
+				err = parseString(&v.FsName)
 			case "cache_dir":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.CacheDir = d.Val()
+				err = parseString(&v.CacheDir)
 			case "max_age":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.CacheMaxAge = d.Val()
+				err = parseString(&v.CacheMaxAge)
 			case "max_size":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.CacheMaxSize = d.Val()
+				err = parseString(&v.CacheMaxSize)
 			case "chunk_size":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.CacheChunkSize = d.Val()
+				err = parseString(&v.CacheChunkSize)
+			case "cache_mode":
+				err = parseString(&v.CacheMode)
+			case "write_wait":
+				err = parseString(&v.WriteWait)
+			case "read_wait":
+				err = parseString(&v.ReadWait)
+			case "write_back":
+				err = parseString(&v.WriteBack)
+			case "dir_cache_time":
+				err = parseString(&v.DirCacheTime)
+			case "min_free_space":
+				err = parseString(&v.CacheMinFreeSpace)
+			case "dir_perms":
+				err = parseString(&v.DirPerms)
+			case "file_perms":
+				err = parseString(&v.FilePerms)
+
+			// Integer options
 			case "chunk_streams":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				streams, err := strconv.Atoi(d.Val())
-				if err != nil {
-					return d.Errf("invalid chunk_streams: %v", err)
+				streams, parseErr := strconv.Atoi(d.Val())
+				if parseErr != nil {
+					return d.Errf("invalid chunk_streams: %v", parseErr)
 				}
 				v.CacheChunkStreams = streams
+
+			case "shard-level":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				level, parseErr := strconv.Atoi(d.Val())
+				if parseErr != nil {
+					return d.Errf("invalid shard-level: %v", parseErr)
+				}
+				v.ShardLevel = level
+
+			// Boolean flags (no argument needed)
+			case "passthrough":
+				v.Passthrough = true
 			case "strip_query":
 				v.StripQuery = true
 			case "strip_domain":
 				v.StripDomain = true
-			case "metadata_cache_size":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.MetadataCacheSize = d.Val()
-			case "cache_mode":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.CacheMode = d.Val()
-			case "write_wait":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.WriteWait = d.Val()
-			case "read_wait":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.ReadWait = d.Val()
-			case "write_back":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.WriteBack = d.Val()
-			case "dir_cache_time":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.DirCacheTime = d.Val()
 			case "fast_fingerprint":
 				v.FastFingerprint = true
-			case "min_free_space":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.CacheMinFreeSpace = d.Val()
 			case "case_insensitive":
 				v.CaseInsensitive = true
 			case "read_only":
@@ -251,18 +349,13 @@ func (v *VFS) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				v.NoChecksum = true
 			case "no_seek":
 				v.NoSeek = true
-			case "dir_perms":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.DirPerms = d.Val()
-			case "file_perms":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				v.FilePerms = d.Val()
+
 			default:
-				return d.Errf("unknown subdirective '%s'", d.Val())
+				return d.Errf("unknown subdirective '%s'", directive)
+			}
+
+			if err != nil {
+				return err
 			}
 		}
 	}

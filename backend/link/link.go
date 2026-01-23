@@ -2,17 +2,16 @@ package link
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
+	"path"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/coocood/freecache"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/fserrors"
@@ -28,20 +27,14 @@ var retryErrorCodes = []int{
 	503, // Service Unavailable
 	504, // Gateway Timeout
 	509, // Bandwidth Limit Exceeded
+
 }
 
-func shouldRetry(resp *http.Response, err error) (bool, error) {
-	if err != nil {
-		return fserrors.ShouldRetry(err), err
+func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {
+	if fserrors.ContextError(ctx, &err) {
+		return false, err
 	}
-	if resp != nil {
-		for _, code := range retryErrorCodes {
-			if resp.StatusCode == code {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
+	return fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
 }
 
 var (
@@ -69,7 +62,7 @@ func Load(remote string) (string, bool) {
 func init() {
 	fs.Register(&fs.RegInfo{
 		Name:        "link",
-		Description: "Multi-Link Dynamic Backend",
+		Description: "Multi-Link Dynamic Backend with Hash Sharding",
 		NewFs:       NewFs,
 	})
 }
@@ -80,7 +73,7 @@ type Fs struct {
 	features    *fs.Features
 	stripQuery  bool
 	stripDomain bool
-	cache       *freecache.Cache
+	shardLevel  int
 	pacer       *fs.Pacer
 }
 
@@ -90,141 +83,183 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		root:  root,
 		pacer: fs.NewPacer(ctx, pacer.NewDefault()),
 	}
-	// Parse backend options
+
 	if val, ok := m.Get("strip_query"); ok && val == "true" {
 		f.stripQuery = true
 	}
+
 	if val, ok := m.Get("strip_domain"); ok && val == "true" {
 		f.stripDomain = true
 	}
-	if val, ok := m.Get("cache_size"); ok && val != "" {
-		var s fs.SizeSuffix
-		s.Set(val)
-		f.cache = freecache.NewCache(int(s))
+
+	if val, ok := m.Get("shard_level"); ok && val != "" {
+		if level, err := strconv.Atoi(val); err == nil {
+			f.shardLevel = level
+		}
 	} else {
-		f.cache = freecache.NewCache(5 * 1024 * 1024)
+		f.shardLevel = 1
 	}
 
 	f.features = (&fs.Features{
 		ReadMetadata: true,
 	}).Fill(ctx, f)
+
 	return f, nil
 }
 
-func (f *Fs) Name() string             { return f.name }
-func (f *Fs) Root() string             { return f.root }
-func (f *Fs) String() string           { return "link:" }
+func (f *Fs) Name() string { return f.name }
+
+func (f *Fs) Root() string { return f.root }
+
+func (f *Fs) String() string { return "link:" }
+
 func (f *Fs) Precision() time.Duration { return time.Second }
-func (f *Fs) Hashes() hash.Set         { return hash.Set(hash.None) }
-func (f *Fs) Features() *fs.Features   { return f.features }
+
+func (f *Fs) Hashes() hash.Set { return hash.Set(hash.None) }
+
+func (f *Fs) Features() *fs.Features { return f.features }
 
 func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
-	if dir != "" {
-		return nil, fs.ErrorDirNotFound
-	}
+
 	var entries fs.DirEntries
+
+	cleanDir := path.Clean(dir)
+
+	if cleanDir == "." {
+		cleanDir = ""
+	}
+
+	dirMap := make(map[string]struct{})
+
 	urlMap.Range(func(key, value any) bool {
+
 		remote := key.(string)
-		obj, err := f.NewObject(ctx, remote)
-		if err == nil {
-			entries = append(entries, obj)
+
+		sharded := ShardedPath(remote, f.shardLevel)
+
+		objDir := path.Dir(sharded)
+
+		if objDir == "." {
+			objDir = ""
+		}
+
+		if objDir == cleanDir {
+			obj, err := f.NewObject(ctx, sharded)
+			if err == nil {
+				entries = append(entries, obj)
+			}
+			return true
+
+		}
+		var relativePath string
+
+		if cleanDir == "" {
+			relativePath = sharded
+		} else if strings.HasPrefix(sharded, cleanDir+"/") {
+			relativePath = sharded[len(cleanDir)+1:]
+		} else {
+			return true
+		}
+
+		parts := strings.Split(relativePath, "/")
+
+		if len(parts) > 1 {
+			subDirName := parts[0]
+			fullDirPath := subDirName
+			if cleanDir != "" {
+				fullDirPath = path.Join(cleanDir, subDirName)
+			}
+			if _, exists := dirMap[fullDirPath]; !exists {
+				dirMap[fullDirPath] = struct{}{}
+				entries = append(entries, fs.NewDir(fullDirPath, time.Now()))
+			}
 		}
 		return true
 	})
+
 	return entries, nil
 }
 
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
-	val, ok := urlMap.Load(remote)
+	originalRemote := path.Base(remote)
+	val, ok := urlMap.Load(originalRemote)
+
 	if !ok {
 		return nil, fs.ErrorObjectNotFound
 	}
+
 	e := val.(*entry)
-	u := e.url
 
-	// Generate cache key from URL hash to avoid duplication
-	keyURL := StripURL(u, f.stripQuery, f.stripDomain)
-
-	keyHash := md5.Sum([]byte(keyURL))
-	cacheKey := keyHash[:]
-
-	if f.cache != nil {
-		if val, err := f.cache.Get(cacheKey); err == nil && len(val) == 16 {
-			size := int64(binary.LittleEndian.Uint64(val[:8]))
-			modTime := time.Unix(0, int64(binary.LittleEndian.Uint64(val[8:])))
-			return &Object{
-				fs:      f,
-				remote:  remote,
-				url:     u,
-				header:  e.header,
-				size:    size,
-				modTime: modTime,
-			}, nil
-		}
+	modTime, size, err := f.fetchMetadata(ctx, e.url, e.header, originalRemote)
+	if err != nil {
+		return nil, err
 	}
+	return &Object{
+		fs:      f,
+		remote:  remote,
+		url:     e.url,
+		size:    size,
+		modTime: modTime,
+	}, nil
+}
 
+func (f *Fs) fetchMetadata(ctx context.Context, urlStr string, header http.Header, remote string) (time.Time, int64, error) {
 	client := fshttp.NewClient(ctx)
-
-	var resp *http.Response
-	var err error
 
 	newReq := func(method, urlStr string) (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, method, urlStr, nil)
 		if err != nil {
 			return nil, err
 		}
-		if e.header != nil {
-			if v := e.header.Get("Authorization"); v != "" {
-				req.Header.Set("Authorization", v)
-			}
-			if v := e.header.Get("Cookie"); v != "" {
-				req.Header.Set("Cookie", v)
+
+		for k, vv := range header {
+			for _, v := range vv {
+				req.Header.Set(k, v)
 			}
 		}
+
 		return req, nil
 	}
 
-	// Try HEAD first
-	req, err := newReq("HEAD", u)
+	req, err := newReq("HEAD", urlStr)
 	if err != nil {
-		return nil, err
+		return time.Time{}, 0, err
 	}
 
+	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = client.Do(req)
-		retry, _ := shouldRetry(resp, err)
-		return retry, err
+		return shouldRetry(ctx, resp, err)
 	})
 
-	// Fallback to GET if HEAD is not allowed or supported, or if size is unknown (-1)
-	if err != nil || (resp == nil || resp.StatusCode != http.StatusOK) || resp.ContentLength < 0 {
-		req, err = newReq("GET", u)
+	needFallback := err != nil || resp == nil || resp.StatusCode != http.StatusOK || resp.ContentLength < 0
+	if needFallback {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+		req, err = newReq("GET", urlStr)
 		if err != nil {
-			return nil, err
+			return time.Time{}, 0, err
 		}
 		req.Header.Set("Range", "bytes=0-0")
 		err = f.pacer.Call(func() (bool, error) {
 			resp, err = client.Do(req)
-			retry, _ := shouldRetry(resp, err)
-			return retry, err
+			return shouldRetry(ctx, resp, err)
 		})
 		if err != nil {
-			log.Printf("GET range failed for %s: %v", remote, err)
-			return nil, err
+			return time.Time{}, 0, err
 		}
 	}
 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		log.Printf("Metadata fetch failed for %s: status %d (URL: %s)", remote, resp.StatusCode, u)
-		return nil, fmt.Errorf("metadata fetch failed: status %d", resp.StatusCode)
+		return time.Time{}, 0, fmt.Errorf("metadata fetch failed: status %d", resp.StatusCode)
 	}
 
 	size := resp.ContentLength
 	if resp.StatusCode == http.StatusPartialContent {
-		var contentRange = resp.Header.Get("Content-Range")
-		if contentRange != "" {
+		if contentRange := resp.Header.Get("Content-Range"); contentRange != "" {
 			var start, end, total int64
 			_, err := fmt.Sscanf(contentRange, "bytes %d-%d/%d", &start, &end, &total)
 			if err == nil {
@@ -241,25 +276,10 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	}
 
 	if size < 0 {
-		return nil, fmt.Errorf("metadata fetch failed: unknown file size for %s", u)
+		return time.Time{}, 0, fmt.Errorf("metadata fetch failed: unknown file size")
 	}
 
-	// Store in cache
-	buf := make([]byte, 16)
-	binary.LittleEndian.PutUint64(buf[:8], uint64(size))
-	binary.LittleEndian.PutUint64(buf[8:], uint64(modTime.UnixNano()))
-	if f.cache != nil {
-		f.cache.Set(cacheKey, buf, 3600)
-	}
-
-	return &Object{
-		fs:      f,
-		remote:  remote,
-		url:     u,
-		header:  e.header,
-		size:    size,
-		modTime: modTime,
-	}, nil
+	return modTime, size, nil
 }
 
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -273,7 +293,6 @@ type Object struct {
 	fs       *Fs
 	remote   string
 	url      string
-	header   http.Header
 	size     int64
 	modTime  time.Time
 	mimeType string
@@ -301,25 +320,30 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	if err != nil {
 		return nil, err
 	}
-	if o.header != nil {
-		if v := o.header.Get("Authorization"); v != "" {
-			req.Header.Set("Authorization", v)
-		}
-		if v := o.header.Get("Cookie"); v != "" {
-			req.Header.Set("Cookie", v)
+
+	// Apply stored headers from urlMap dynamically
+	originalRemote := path.Base(o.remote)
+	if val, ok := urlMap.Load(originalRemote); ok {
+		e := val.(*entry)
+		if e.header != nil {
+			for k, vv := range e.header {
+				for _, v := range vv {
+					req.Header.Set(k, v)
+				}
+			}
 		}
 	}
+
+	// Apply OpenOptions (can override stored headers)
 	for k, v := range fs.OpenOptionHeaders(options) {
-		req.Header.Add(k, v)
+		req.Header.Set(k, v)
 	}
 
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = client.Do(req)
-		retry, _ := shouldRetry(resp, err)
-		return retry, err
+		return shouldRetry(ctx, resp, err)
 	})
-
 	if err != nil {
 		return nil, err
 	}
@@ -327,9 +351,10 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 		resp.Body.Close()
 		return nil, fmt.Errorf("GET failed: %s (status %d)", resp.Status, resp.StatusCode)
 	}
-
 	return resp.Body, nil
 }
 
-var _ fs.Fs = &Fs{}
-var _ fs.Object = &Object{}
+var (
+	_ fs.Fs     = &Fs{}
+	_ fs.Object = &Object{}
+)

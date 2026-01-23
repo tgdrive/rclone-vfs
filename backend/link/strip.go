@@ -2,10 +2,9 @@ package link
 
 import (
 	"net/url"
+	"path"
 )
 
-// StripURL removes parts of the URL based on strip options.
-// Returns the stripped URL suitable for generating cache keys.
 func StripURL(u string, stripQuery, stripDomain bool) string {
 	if !stripQuery && !stripDomain {
 		return u
@@ -27,4 +26,21 @@ func StripURL(u string, stripQuery, stripDomain bool) string {
 	}
 
 	return parsedURL.String()
+}
+
+func ShardedPath(fileHash string, level int) string {
+	if level <= 0 || len(fileHash) < 2 {
+		return fileHash
+	}
+	parts := make([]string, 0, level+1)
+	for i := range level {
+		start := i * 2
+		end := (i + 1) * 2
+		if end > len(fileHash) {
+			break
+		}
+		parts = append(parts, fileHash[start:end])
+	}
+	parts = append(parts, fileHash)
+	return path.Join(parts...)
 }
