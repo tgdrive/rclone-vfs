@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"strconv"
 	"sync"
+	"time"
 
 	_ "github.com/rclone/rclone/backend/local"
 	"github.com/rclone/rclone/fs"
@@ -244,30 +246,83 @@ func (h *Handler) getFileHash(targetURL string) string {
 	return computedHash
 }
 
-func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string) {
+// ServeWithSize serves a file with a known size, skipping metadata fetch.
+func (h *Handler) ServeWithSize(w http.ResponseWriter, r *http.Request, targetURL string, size int64) {
 	if targetURL == "" {
 		http.Error(w, "Target URL is required", http.StatusBadRequest)
 		return
 	}
 
 	fileHash := h.getFileHash(targetURL)
+	isNew := link.RegisterWithSize(fileHash, targetURL, r.Header.Clone(), size)
+	
+	// Only flush VFS directory cache if this is a NEW entry
+	if isNew {
+		h.VFS.FlushDirCache()
+	}
 
-	link.Register(fileHash, targetURL, r.Header.Clone())
+	h.ServeFile(w, r, link.ShardedPath(fileHash, h.shardLevel))
+}
+
+func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string) {
+	if targetURL == "" {
+		http.Error(w, "Target URL is required", http.StatusBadRequest)
+		return
+	}
+
+	// Check for X-File-Size header or size query param to skip metadata fetch
+	var size int64
+	if sizeStr := r.Header.Get("X-File-Size"); sizeStr != "" {
+		if s, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && s > 0 {
+			size = s
+		}
+	}
+	if size == 0 {
+		if sizeStr := r.URL.Query().Get("size"); sizeStr != "" {
+			if s, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && s > 0 {
+				size = s
+			}
+		}
+	}
+
+	fileHash := h.getFileHash(targetURL)
+
+	var isNew bool
+	if size > 0 {
+		isNew = link.RegisterWithSize(fileHash, targetURL, r.Header.Clone(), size)
+	} else {
+		isNew = link.Register(fileHash, targetURL, r.Header.Clone())
+	}
+	
+	// Only flush VFS directory cache if this is a NEW entry
+	if isNew {
+		h.VFS.FlushDirCache()
+	}
 
 	h.ServeFile(w, r, link.ShardedPath(fileHash, h.shardLevel))
 }
 
 func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request, remote string) {
 	ctx := r.Context()
+	
 	node, err := h.VFS.Stat(remote)
+	
+	// If not found, flush VFS cache and retry once (handles expired dir-cache)
 	if err == vfs.ENOENT {
-		fs.Infof(remote, "%s: File not found", r.RemoteAddr)
-		http.Error(w, "File not found", http.StatusNotFound)
-		return
-	} else if err != nil {
+		h.VFS.FlushDirCache()
+		node, err = h.VFS.Stat(remote)
+		if err == vfs.ENOENT {
+			http.Error(w, "File not found", http.StatusNotFound)
+			return
+		}
+	}
+	
+	if err != nil {
+		log.Printf("[ERROR] Stat failed for %s: %v", remote, err)
 		http.Error(w, "Failed to find file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	
 	if !node.IsFile() {
 		http.Error(w, "Not a file", http.StatusNotFound)
 		return
@@ -300,6 +355,7 @@ func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request, remote strin
 	// open the object
 	in, err := file.Open(os.O_RDONLY)
 	if err != nil {
+		log.Printf("[ERROR] Failed to open %s: %v", remote, err)
 		http.Error(w, "Failed to open file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -314,10 +370,6 @@ func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request, remote strin
 			http.Error(w, "Can't use Range: on files of unknown length", http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
-		n, err := io.Copy(w, in)
-		if err != nil {
-			fs.Errorf(obj, "Didn't finish writing GET request (wrote %d/unknown bytes): %v", n, err)
-			return
-		}
+		_, _ = io.Copy(w, in)
 	}
 }

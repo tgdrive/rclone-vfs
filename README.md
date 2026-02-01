@@ -58,6 +58,25 @@ Useful for players that struggle with query parameters.
 1. Base64 encode your URL: `https://example.com/video.mp4` -> `aHR0cHM6Ly9leGFtcGxlLmNvbS92aWRlby5tcDQ`
 2. Request: `GET /stream/aHR0cHM6Ly9leGFtcGxlLmNvbS92aWRlby5tcDQ`
 
+### 3. Providing File Size (Optimization)
+By default, the proxy makes a request to the origin server to fetch the file size (metadata). You can skip this by providing the size upfront:
+
+**Via Query Parameter:**
+```http
+GET /stream?url=https://example.com/video.mp4&size=1073741824
+```
+
+**Via HTTP Header:**
+```http
+GET /stream?url=https://example.com/video.mp4
+X-File-Size: 1073741824
+```
+
+**Benefits:**
+- Eliminates the metadata fetch request to the origin
+- Faster time-to-first-byte
+- Reduced load on the origin server
+
 ## Caddy Plugin
 
 Build Caddy with the module:

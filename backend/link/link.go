@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"path"
 	"strconv"
@@ -43,12 +44,30 @@ var (
 )
 
 type entry struct {
-	url    string
-	header http.Header
+	url     string
+	header  http.Header
+	size    int64     // pre-provided size (0 means fetch needed)
+	modTime time.Time // pre-provided modTime
 }
 
-func Register(remote, url string, header http.Header) {
+// Register stores a URL mapping. Metadata will be fetched on first access.
+// Returns true if this is a new entry, false if already registered.
+func Register(remote, url string, header http.Header) bool {
+	if _, exists := urlMap.Load(remote); exists {
+		return false
+	}
 	urlMap.Store(remote, &entry{url: url, header: header})
+	return true
+}
+
+// RegisterWithSize stores a URL mapping with known size to skip metadata fetch.
+// Returns true if this is a new entry, false if already registered.
+func RegisterWithSize(remote, url string, header http.Header, size int64) bool {
+	if _, exists := urlMap.Load(remote); exists {
+		return false
+	}
+	urlMap.Store(remote, &entry{url: url, header: header, size: size, modTime: time.Now()})
+	return true
 }
 
 func Load(remote string) (string, bool) {
@@ -182,6 +201,7 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	originalRemote := path.Base(remote)
+	
 	val, ok := urlMap.Load(originalRemote)
 
 	if !ok {
@@ -190,10 +210,24 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 	e := val.(*entry)
 
+	// If size is already known, skip metadata fetch entirely
+	if e.size > 0 {
+		return &Object{
+			fs:      f,
+			remote:  remote,
+			url:     e.url,
+			size:    e.size,
+			modTime: e.modTime,
+		}, nil
+	}
+
+	// Fetch metadata (slow path)
 	modTime, size, err := f.fetchMetadata(ctx, e.url, e.header, originalRemote)
 	if err != nil {
+		log.Printf("[ERROR] Metadata fetch failed for %s: %v", originalRemote, err)
 		return nil, err
 	}
+
 	return &Object{
 		fs:      f,
 		remote:  remote,
@@ -206,49 +240,28 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 func (f *Fs) fetchMetadata(ctx context.Context, urlStr string, header http.Header, remote string) (time.Time, int64, error) {
 	client := fshttp.NewClient(ctx)
 
-	newReq := func(method, urlStr string) (*http.Request, error) {
-		req, err := http.NewRequestWithContext(ctx, method, urlStr, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		for k, vv := range header {
-			for _, v := range vv {
-				req.Header.Set(k, v)
-			}
-		}
-
-		return req, nil
-	}
-
-	req, err := newReq("HEAD", urlStr)
+	req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 	if err != nil {
 		return time.Time{}, 0, err
 	}
 
+	for k, vv := range header {
+		for _, v := range vv {
+			req.Header.Set(k, v)
+		}
+	}
+
+	// Use GET with Range header to fetch only 1 byte + headers
+	// Many backends (like teldrive) don't support HEAD requests
+	req.Header.Set("Range", "bytes=0-0")
+	
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = client.Do(req)
 		return shouldRetry(ctx, resp, err)
 	})
-
-	needFallback := err != nil || resp == nil || resp.StatusCode != http.StatusOK || resp.ContentLength < 0
-	if needFallback {
-		if resp != nil && resp.Body != nil {
-			resp.Body.Close()
-		}
-		req, err = newReq("GET", urlStr)
-		if err != nil {
-			return time.Time{}, 0, err
-		}
-		req.Header.Set("Range", "bytes=0-0")
-		err = f.pacer.Call(func() (bool, error) {
-			resp, err = client.Do(req)
-			return shouldRetry(ctx, resp, err)
-		})
-		if err != nil {
-			return time.Time{}, 0, err
-		}
+	if err != nil {
+		return time.Time{}, 0, err
 	}
 
 	defer resp.Body.Close()
@@ -260,8 +273,8 @@ func (f *Fs) fetchMetadata(ctx context.Context, urlStr string, header http.Heade
 	size := resp.ContentLength
 	if resp.StatusCode == http.StatusPartialContent {
 		if contentRange := resp.Header.Get("Content-Range"); contentRange != "" {
-			var start, end, total int64
-			_, err := fmt.Sscanf(contentRange, "bytes %d-%d/%d", &start, &end, &total)
+			var rangeStart, end, total int64
+			_, err := fmt.Sscanf(contentRange, "bytes %d-%d/%d", &rangeStart, &end, &total)
 			if err == nil {
 				size = total
 			}
