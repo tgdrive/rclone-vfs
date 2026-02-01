@@ -272,17 +272,12 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string
 
 	// Check for X-File-Size header or size query param to skip metadata fetch
 	var size int64
-	if sizeStr := r.Header.Get("X-File-Size"); sizeStr != "" {
-		if s, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && s > 0 {
-			size = s
-		}
+	sizeStr := r.Header.Get("X-File-Size")
+	if sizeStr == "" {
+		sizeStr = r.URL.Query().Get("size")
 	}
-	if size == 0 {
-		if sizeStr := r.URL.Query().Get("size"); sizeStr != "" {
-			if s, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && s > 0 {
-				size = s
-			}
-		}
+	if s, err := strconv.ParseInt(sizeStr, 10, 64); err == nil && s > 0 {
+		size = s
 	}
 
 	fileHash := h.getFileHash(targetURL)

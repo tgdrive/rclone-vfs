@@ -53,21 +53,15 @@ type entry struct {
 // Register stores a URL mapping. Metadata will be fetched on first access.
 // Returns true if this is a new entry, false if already registered.
 func Register(remote, url string, header http.Header) bool {
-	if _, exists := urlMap.Load(remote); exists {
-		return false
-	}
-	urlMap.Store(remote, &entry{url: url, header: header})
-	return true
+	_, loaded := urlMap.LoadOrStore(remote, &entry{url: url, header: header})
+	return !loaded
 }
 
 // RegisterWithSize stores a URL mapping with known size to skip metadata fetch.
 // Returns true if this is a new entry, false if already registered.
 func RegisterWithSize(remote, url string, header http.Header, size int64) bool {
-	if _, exists := urlMap.Load(remote); exists {
-		return false
-	}
-	urlMap.Store(remote, &entry{url: url, header: header, size: size, modTime: time.Now()})
-	return true
+	_, loaded := urlMap.LoadOrStore(remote, &entry{url: url, header: header, size: size, modTime: time.Now()})
+	return !loaded
 }
 
 func Load(remote string) (string, bool) {
