@@ -34,6 +34,8 @@ type Options struct {
 	StripQuery        bool   `vfs:"-" flag:"strip-query" caddy:"strip_query" help:"Strip query parameters from URL for caching"`
 	StripDomain       bool   `vfs:"-" flag:"strip-domain" caddy:"strip_domain" help:"Strip domain and protocol from URL for caching"`
 	ShardLevel        int    `vfs:"-" flag:"shard-level" caddy:"shard-level" help:"Number of shard levels" default:"1"`
+	MetaCacheTTL      string `vfs:"-" flag:"meta-cache-ttl" caddy:"meta_cache_ttl" help:"Metadata cache TTL (e.g., 5m, 1h, 24h)" default:"5m"`
+	NoHead            bool   `vfs:"-" flag:"no-head" caddy:"no_head" help:"Skip HEAD requests, use GET with Range instead"`
 
 	// Additional VFS Options
 	CacheMode         string `vfs:"vfs_cache_mode" flag:"cache-mode" caddy:"cache_mode" help:"VFS cache mode (off, minimal, writes, full)"`
@@ -174,6 +176,8 @@ func NewHandler(opt Options) (*Handler, error) {
 		"strip_query":  strconv.FormatBool(opt.StripQuery),
 		"strip_domain": strconv.FormatBool(opt.StripDomain),
 		"shard_level":  strconv.Itoa(opt.ShardLevel),
+		"cache_ttl":    opt.MetaCacheTTL,
+		"no_head":      strconv.FormatBool(opt.NoHead),
 	}
 
 	// Create a new file system for the link backend

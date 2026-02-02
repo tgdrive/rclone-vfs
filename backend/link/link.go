@@ -42,9 +42,17 @@ var (
 	urlMap        sync.Map
 )
 
+type cachedMeta struct {
+	size     int64
+	modTime  time.Time
+	cachedAt time.Time
+}
+
 type entry struct {
 	url    string
 	header http.Header
+	mu     sync.RWMutex
+	meta   *cachedMeta
 }
 
 func Register(remote, url string, header http.Header) {
@@ -75,13 +83,16 @@ type Fs struct {
 	stripDomain bool
 	shardLevel  int
 	pacer       *fs.Pacer
+	cacheTTL    time.Duration
+	noHead      bool
 }
 
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	f := &Fs{
-		name:  name,
-		root:  root,
-		pacer: fs.NewPacer(ctx, pacer.NewDefault()),
+		name:     name,
+		root:     root,
+		pacer:    fs.NewPacer(ctx, pacer.NewDefault()),
+		cacheTTL: 5 * time.Minute, // Default 5 minutes
 	}
 
 	if val, ok := m.Get("strip_query"); ok && val == "true" {
@@ -98,6 +109,16 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		}
 	} else {
 		f.shardLevel = 1
+	}
+
+	if val, ok := m.Get("cache_ttl"); ok && val != "" {
+		if duration, err := time.ParseDuration(val); err == nil {
+			f.cacheTTL = duration
+		}
+	}
+
+	if val, ok := m.Get("no_head"); ok && val == "true" {
+		f.noHead = true
 	}
 
 	f.features = (&fs.Features{
@@ -190,10 +211,37 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 	e := val.(*entry)
 
+	// Check cache first
+	e.mu.RLock()
+	if e.meta != nil && time.Since(e.meta.cachedAt) < f.cacheTTL {
+		// Cache hit
+		meta := e.meta
+		e.mu.RUnlock()
+		return &Object{
+			fs:      f,
+			remote:  remote,
+			url:     e.url,
+			size:    meta.size,
+			modTime: meta.modTime,
+		}, nil
+	}
+	e.mu.RUnlock()
+
+	// Cache miss or expired - fetch from upstream
 	modTime, size, err := f.fetchMetadata(ctx, e.url, e.header, originalRemote)
 	if err != nil {
 		return nil, err
 	}
+
+	// Store in cache
+	e.mu.Lock()
+	e.meta = &cachedMeta{
+		size:     size,
+		modTime:  modTime,
+		cachedAt: time.Now(),
+	}
+	e.mu.Unlock()
+
 	return &Object{
 		fs:      f,
 		remote:  remote,
@@ -218,45 +266,61 @@ func (f *Fs) fetchMetadata(ctx context.Context, urlStr string, header http.Heade
 			}
 		}
 
+		// Indicate we support range requests
+		req.Header.Set("Accept-Ranges", "bytes")
+
 		return req, nil
 	}
 
-	req, err := newReq("HEAD", urlStr)
-	if err != nil {
-		return time.Time{}, 0, err
-	}
-
 	var resp *http.Response
-	err = f.pacer.Call(func() (bool, error) {
-		resp, err = client.Do(req)
-		return shouldRetry(ctx, resp, err)
-	})
 
-	needFallback := err != nil || resp == nil || resp.StatusCode != http.StatusOK || resp.ContentLength < 0
-	if needFallback {
-		if resp != nil && resp.Body != nil {
-			resp.Body.Close()
-		}
-		req, err = newReq("GET", urlStr)
+	// Skip HEAD request if noHead is enabled
+	if !f.noHead {
+		req, err := newReq("HEAD", urlStr)
 		if err != nil {
 			return time.Time{}, 0, err
 		}
-		req.Header.Set("Range", "bytes=0-0")
+
 		err = f.pacer.Call(func() (bool, error) {
 			resp, err = client.Do(req)
 			return shouldRetry(ctx, resp, err)
 		})
-		if err != nil {
-			return time.Time{}, 0, err
+
+		needFallback := err != nil || resp == nil || resp.StatusCode != http.StatusOK || resp.ContentLength < 0
+		if !needFallback {
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+				return time.Time{}, 0, fmt.Errorf("metadata fetch failed: status %d", resp.StatusCode)
+			}
+			return parseMetadataResponse(resp)
 		}
+		resp.Body.Close()
 	}
 
+	// Use GET with Range for metadata
+	req, err := newReq("GET", urlStr)
+	if err != nil {
+		return time.Time{}, 0, err
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = client.Do(req)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return time.Time{}, 0, err
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return time.Time{}, 0, fmt.Errorf("metadata fetch failed: status %d", resp.StatusCode)
 	}
 
+	return parseMetadataResponse(resp)
+}
+
+// parseMetadataResponse parses metadata from a successful HEAD or GET response
+func parseMetadataResponse(resp *http.Response) (time.Time, int64, error) {
 	size := resp.ContentLength
 	if resp.StatusCode == http.StatusPartialContent {
 		if contentRange := resp.Header.Get("Content-Range"); contentRange != "" {
