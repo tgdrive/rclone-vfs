@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tgdrive/varc/pkg/vfsproxy"
+	"github.com/tgdrive/varc/pkg/proxy"
 
 	"github.com/spf13/pflag"
 )
@@ -21,7 +21,7 @@ import (
 var (
 	port = pflag.String("port", "8080", "Port to listen on")
 	cacheDir = pflag.String("cache-dir", filepath.Join(os.TempDir(), "varc_cache"), "Cache directory")
-	cacheMode = pflag.String("cache-mode", "minimal", "VFS cache mode (off, minimal, writes, full)")
+	cacheMode = pflag.String("cache-mode", "minimal", "Cache mode (off, minimal, writes, full)")
 	chunkSize = pflag.String("chunk-size", "", "Chunk size for reading (e.g., 4M)")
 	chunkStreams = pflag.Int("chunk-streams", 2, "Number of parallel chunk streams")
 	stripQuery = pflag.Bool("strip-query", false, "Strip query parameters from URL for caching")
@@ -32,7 +32,7 @@ var (
 func main() {
 	pflag.Parse()
 
-	opt := vfsproxy.Options{
+	opt := proxy.Options{
 		CacheDir:          *cacheDir,
 		CacheMode:         *cacheMode,
 		CacheChunkSize:    *chunkSize,
@@ -42,7 +42,7 @@ func main() {
 		ShardLevel:        *shardLevel,
 	}
 
-	handler, err := vfsproxy.NewHandler(opt)
+	handler, err := proxy.NewHandler(opt)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok","cache_dir":"%s"}`, handler.VFS.Opt.CacheDir)
+		fmt.Fprintf(w, `{"status":"ok","cache_dir":"%s"}`, handler.Engine.Opt.CacheDir)
 	})
 
 	srv := &http.Server{
@@ -90,9 +90,9 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("VFS Proxy listening on :%s", *port)
-		log.Printf("VFS Cache Mode: %v", handler.VFS.Opt.CacheMode)
-		log.Printf("VFS Cache Dir: %s", handler.VFS.Opt.CacheDir)
+		log.Printf("Engine listening on :%s", *port)
+		log.Printf("Cache Mode: %v", handler.Engine.Opt.CacheMode)
+		log.Printf("Cache Dir: %s", handler.Engine.Opt.CacheDir)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %s\n", err)
 		}
@@ -110,7 +110,7 @@ func main() {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
-	log.Println("Shutting down VFS...")
+	log.Println("Shutting down...")
 	handler.Shutdown()
 
 	log.Println("Exit")
