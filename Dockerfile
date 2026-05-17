@@ -9,13 +9,13 @@ ARG GROUP_ID=1000
 RUN addgroup -g ${GROUP_ID} app && \
     adduser -D -u ${USER_ID} -G app app
 
-COPY $TARGETPLATFORM/rclone-vfs /rclone-vfs
+COPY $TARGETPLATFORM/varc /varc
 
 USER app
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/rclone-vfs", "--help"]
+    CMD ["/varc", "--help"]
 
 STOPSIGNAL SIGTERM
 
-CMD ["/rclone-vfs"]
+CMD ["/varc"]
