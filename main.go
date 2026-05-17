@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,6 +15,7 @@ import (
 	"github.com/tgdrive/varc/pkg/proxy"
 
 	"github.com/spf13/pflag"
+	"go.uber.org/zap"
 )
 
 var (
@@ -32,6 +32,12 @@ var (
 func main() {
 	pflag.Parse()
 
+	zapLogger, err := zap.NewProduction()
+	if err != nil {
+		panic(err)
+	}
+	defer zapLogger.Sync()
+
 	opt := proxy.Options{
 		CacheDir:          *cacheDir,
 		CacheMode:         *cacheMode,
@@ -40,11 +46,12 @@ func main() {
 		StripQuery:        *stripQuery,
 		StripDomain:       *stripDomain,
 		ShardLevel:        *shardLevel,
+		Logger:            zapLogger.Sugar(),
 	}
 
 	handler, err := proxy.NewHandler(opt)
 	if err != nil {
-		log.Fatal(err)
+		zapLogger.Fatal("Failed to create handler", zap.Error(err))
 	}
 
 	mux := http.NewServeMux()
@@ -90,28 +97,30 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Engine listening on :%s", *port)
-		log.Printf("Cache Mode: %v", handler.Engine.Opt.CacheMode)
-		log.Printf("Cache Dir: %s", handler.Engine.Opt.CacheDir)
+		zapLogger.Info("Engine listening",
+			zap.String("addr", ":"+*port),
+			zap.String("cache_mode", handler.Engine.Opt.CacheMode.String()),
+			zap.String("cache_dir", handler.Engine.Opt.CacheDir),
+		)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
+			zapLogger.Fatal("Listen error", zap.Error(err))
 		}
 	}()
 
 	<-stop
 
-	log.Println("Shutting down gracefully...")
+	zapLogger.Info("Shutting down gracefully...")
 
 	// Create a context with timeout for the shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+		zapLogger.Fatal("Server forced to shutdown", zap.Error(err))
 	}
 
-	log.Println("Shutting down...")
+	zapLogger.Info("Shutting down handler...")
 	handler.Shutdown()
 
-	log.Println("Exit")
+	zapLogger.Info("Exit")
 }

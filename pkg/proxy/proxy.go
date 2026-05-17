@@ -19,17 +19,18 @@ import (
 	"github.com/tgdrive/varc/internal/types"
 )
 
-// Options holds configuration for the VFS proxy handler
+// Options holds configuration for the cache proxy handler
 type Options struct {
-	CacheDir          string `caddy:"cache_dir"`
-	CacheMaxAge       string `caddy:"max_age"`
-	CacheMaxSize      string `caddy:"max_size"`
-	CacheChunkSize    string `caddy:"chunk_size"`
-	CacheChunkStreams int    `caddy:"chunk_streams"`
-	CacheMode         string `caddy:"cache_mode"`
-	StripQuery        bool   `caddy:"strip_query"`
-	StripDomain       bool   `caddy:"strip_domain"`
-	ShardLevel        int    `caddy:"shard_level"`
+	CacheDir          string       `caddy:"cache_dir"`
+	CacheMaxAge       string       `caddy:"max_age"`
+	CacheMaxSize      string       `caddy:"max_size"`
+	CacheChunkSize    string       `caddy:"chunk_size"`
+	CacheChunkStreams int          `caddy:"chunk_streams"`
+	CacheMode         string       `caddy:"cache_mode"`
+	StripQuery        bool         `caddy:"strip_query"`
+	StripDomain       bool         `caddy:"strip_domain"`
+	ShardLevel        int          `caddy:"shard_level"`
+	Logger            types.Logger `caddy:"-"`
 }
 
 // DefaultOptions returns Options with sensible defaults
@@ -93,6 +94,10 @@ func NewHandler(opt Options) (*Handler, error) {
 	// Build engine options
 	engOpt := &types.Options{
 		CacheDir: cacheDir,
+	}
+
+	if opt.Logger != nil {
+		engOpt.Logger = opt.Logger
 	}
 
 	if opt.CacheMaxAge != "" {
