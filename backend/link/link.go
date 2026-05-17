@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/fserrors"
@@ -49,14 +51,21 @@ type cachedMeta struct {
 }
 
 type entry struct {
-	url    string
-	header http.Header
-	mu     sync.RWMutex
-	meta   *cachedMeta
+	url       string
+	header    http.Header
+	mu        sync.RWMutex
+	meta      *cachedMeta
+	createdAt time.Time
+}
+
+// ClearURLMap removes all entries from the global urlMap.
+// Used by tests to reset state between runs.
+func ClearURLMap() {
+	urlMap.Clear()
 }
 
 func Register(remote, url string, header http.Header) {
-	urlMap.Store(remote, &entry{url: url, header: header})
+	urlMap.Store(remote, &entry{url: url, header: header, createdAt: time.Now()})
 }
 
 func Load(remote string) (string, bool) {
@@ -85,6 +94,8 @@ type Fs struct {
 	pacer       *fs.Pacer
 	cacheTTL    time.Duration
 	noHead      bool
+	sfGroup     singleflight.Group
+	httpClient  *http.Client
 }
 
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
@@ -121,9 +132,13 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		f.noHead = true
 	}
 
+	f.httpClient = fshttp.NewClient(ctx)
+
 	f.features = (&fs.Features{
 		ReadMetadata: true,
 	}).Fill(ctx, f)
+
+	f.startCleanupLoop()
 
 	return f, nil
 }
@@ -203,57 +218,62 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	originalRemote := path.Base(remote)
-	val, ok := urlMap.Load(originalRemote)
 
-	if !ok {
-		return nil, fs.ErrorObjectNotFound
-	}
+	result, err, _ := f.sfGroup.Do(originalRemote, func() (interface{}, error) {
+		// Re-check: a previous Do in-flight may have populated the cache
+		val, ok := urlMap.Load(originalRemote)
+		if !ok {
+			return nil, fs.ErrorObjectNotFound
+		}
 
-	e := val.(*entry)
+		e := val.(*entry)
 
-	// Check cache first
-	e.mu.RLock()
-	if e.meta != nil && time.Since(e.meta.cachedAt) < f.cacheTTL {
-		// Cache hit
-		meta := e.meta
+		// Check cache first
+		e.mu.RLock()
+		if e.meta != nil && time.Since(e.meta.cachedAt) < f.cacheTTL {
+			// Cache hit
+			meta := e.meta
+			e.mu.RUnlock()
+			return &Object{
+				fs:      f,
+				remote:  remote,
+				url:     e.url,
+				size:    meta.size,
+				modTime: meta.modTime,
+			}, nil
+		}
 		e.mu.RUnlock()
+
+		// Cache miss or expired - fetch from upstream
+		modTime, size, err := f.fetchMetadata(ctx, e.url, e.header, originalRemote)
+		if err != nil {
+			return nil, err
+		}
+
+		// Store in cache
+		e.mu.Lock()
+		e.meta = &cachedMeta{
+			size:     size,
+			modTime:  modTime,
+			cachedAt: time.Now(),
+		}
+		e.mu.Unlock()
+
 		return &Object{
 			fs:      f,
 			remote:  remote,
 			url:     e.url,
-			size:    meta.size,
-			modTime: meta.modTime,
+			size:    size,
+			modTime: modTime,
 		}, nil
-	}
-	e.mu.RUnlock()
-
-	// Cache miss or expired - fetch from upstream
-	modTime, size, err := f.fetchMetadata(ctx, e.url, e.header, originalRemote)
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Store in cache
-	e.mu.Lock()
-	e.meta = &cachedMeta{
-		size:     size,
-		modTime:  modTime,
-		cachedAt: time.Now(),
-	}
-	e.mu.Unlock()
-
-	return &Object{
-		fs:      f,
-		remote:  remote,
-		url:     e.url,
-		size:    size,
-		modTime: modTime,
-	}, nil
+	return result.(*Object), nil
 }
 
 func (f *Fs) fetchMetadata(ctx context.Context, urlStr string, header http.Header, remote string) (time.Time, int64, error) {
-	client := fshttp.NewClient(ctx)
-
 	newReq := func(method, urlStr string) (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, method, urlStr, nil)
 		if err != nil {
@@ -282,7 +302,7 @@ func (f *Fs) fetchMetadata(ctx context.Context, urlStr string, header http.Heade
 		}
 
 		err = f.pacer.Call(func() (bool, error) {
-			resp, err = client.Do(req)
+			resp, err = f.httpClient.Do(req)
 			return shouldRetry(ctx, resp, err)
 		})
 
@@ -294,7 +314,9 @@ func (f *Fs) fetchMetadata(ctx context.Context, urlStr string, header http.Heade
 			}
 			return parseMetadataResponse(resp)
 		}
-		resp.Body.Close()
+		if resp != nil {
+			resp.Body.Close()
+		}
 	}
 
 	// Use GET with Range for metadata
@@ -304,7 +326,7 @@ func (f *Fs) fetchMetadata(ctx context.Context, urlStr string, header http.Heade
 	}
 	req.Header.Set("Range", "bytes=0-0")
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = client.Do(req)
+		resp, err = f.httpClient.Do(req)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
@@ -379,7 +401,6 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 }
 
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
-	client := fshttp.NewClient(ctx)
 	req, err := http.NewRequestWithContext(ctx, "GET", o.url, nil)
 	if err != nil {
 		return nil, err
@@ -405,7 +426,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 
 	var resp *http.Response
 	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = client.Do(req)
+		resp, err = o.fs.httpClient.Do(req)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
@@ -416,6 +437,40 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 		return nil, fmt.Errorf("GET failed: %s (status %d)", resp.Status, resp.StatusCode)
 	}
 	return resp.Body, nil
+}
+
+// startCleanupLoop starts a background goroutine that periodically evicts
+// stale entries from the global urlMap. Entries that haven't been re-registered
+// (via Register) for more than 2x the cache TTL are removed.
+func (f *Fs) startCleanupLoop() {
+	go func() {
+		interval := 2 * f.cacheTTL
+		if interval < time.Minute {
+			interval = 10 * time.Minute
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			f.cleanupStaleEntries()
+		}
+	}()
+}
+
+// cleanupStaleEntries removes urlMap entries that haven't been registered for
+// more than 2x the cache TTL. Active entries are continuously re-registered
+// via Register() on each Serve() call, so only truly idle entries are purged.
+func (f *Fs) cleanupStaleEntries() {
+	cutoff := time.Now().Add(-2 * f.cacheTTL)
+	urlMap.Range(func(key, value any) bool {
+		e := value.(*entry)
+		e.mu.RLock()
+		stale := e.createdAt.Before(cutoff)
+		e.mu.RUnlock()
+		if stale {
+			urlMap.Delete(key)
+		}
+		return true
+	})
 }
 
 var (

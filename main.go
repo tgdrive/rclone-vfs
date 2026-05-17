@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -56,6 +57,13 @@ func main() {
 
 	mux.HandleFunc("/stream", mainHandler)
 	mux.HandleFunc("/stream/", mainHandler)
+
+	// Health check endpoint
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"status":"ok","cache_mode":"%v","cache_dir":"%s"}`, handler.VFS.Opt.CacheMode, config.GetCacheDir())
+	})
 
 	srv := &http.Server{
 		Addr:    ":" + *port,

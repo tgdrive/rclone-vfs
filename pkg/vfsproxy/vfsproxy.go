@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -221,6 +222,8 @@ func (h *Handler) Shutdown() {
 	h.VFS.Shutdown()
 }
 
+var maxHashCacheEntries = 10000
+
 func (h *Handler) getFileHash(targetURL string) string {
 	h.mu.RLock()
 	fileHash, exists := h.hashCache[targetURL]
@@ -242,10 +245,39 @@ func (h *Handler) getFileHash(targetURL string) string {
 		h.mu.Unlock()
 		return fileHash
 	}
+
+	// Evict entire cache if it exceeds the limit (simple bounded map)
+	if len(h.hashCache) >= maxHashCacheEntries {
+		h.hashCache = make(map[string]string, maxHashCacheEntries/2)
+	}
 	h.hashCache[targetURL] = computedHash
 	h.mu.Unlock()
 
 	return computedHash
+}
+
+// requestHeadersToFilter lists headers that are per-request and must NOT be
+// stored in the shared urlMap. They would corrupt VFS internal reads (caching,
+// chunk fetching, metadata HEAD requests) if forwarded to the upstream.
+// http.ServeContent in ServeFile reads these directly from the request.
+var requestHeadersToFilter = []string{
+	"Range",
+	"If-Range",
+	"If-Modified-Since",
+	"If-Unmodified-Since",
+	"If-None-Match",
+	"If-Match",
+}
+
+// filterRequestHeaders removes per-request headers from a clone so that only
+// headers stable across requests (auth, content negotiation, etc.) are stored
+// in the shared urlMap for VFS upstream operations.
+func filterRequestHeaders(h http.Header) http.Header {
+	filtered := h.Clone()
+	for _, key := range requestHeadersToFilter {
+		filtered.Del(key)
+	}
+	return filtered
 }
 
 func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string) {
@@ -256,7 +288,9 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string
 
 	fileHash := h.getFileHash(targetURL)
 
-	link.Register(fileHash, targetURL, r.Header.Clone())
+	// Store stable headers only — per-request headers (Range, If-*) are
+	// filtered out to prevent corrupting VFS internal upstream requests.
+	link.Register(fileHash, targetURL, filterRequestHeaders(r.Header))
 
 	h.ServeFile(w, r, link.ShardedPath(fileHash, h.shardLevel))
 }
@@ -291,15 +325,13 @@ func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request, remote strin
 	}
 
 	mimeType := fs.MimeType(ctx, obj)
-	if mimeType == "application/octet-stream" && path.Ext(remote) == "" {
-	} else {
+	if mimeType == "" && path.Ext(remote) != "" {
+		mimeType = mime.TypeByExtension(path.Ext(remote))
+	}
+	if mimeType != "" && (mimeType != "application/octet-stream" || path.Ext(remote) != "") {
 		w.Header().Set("Content-Type", mimeType)
 	}
 	w.Header().Set("Last-Modified", file.ModTime().UTC().Format(http.TimeFormat))
-
-	if r.Method == "HEAD" {
-		return
-	}
 
 	// open the object
 	in, err := file.Open(os.O_RDONLY)
