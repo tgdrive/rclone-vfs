@@ -3,7 +3,6 @@
 package file
 
 import (
-	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -47,7 +46,6 @@ func PreAllocate(size int64, out *os.File) (err error) {
 			// Try the next flags combination
 			index++
 			fallocFlagsIndex.Store(index)
-			fmt.Fprintf(os.Stderr, "preAllocate: got error on fallocate, trying combination %d/%d: %v\n", index, len(fallocFlags), err)
 			goto again
 
 		}
