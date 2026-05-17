@@ -13,10 +13,10 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 			cache_dir /tmp/cache
 			cache_mode full
 			max_age 24h
+			chunk_size 4M
 			chunk_streams 4
 			strip_query
-			shard-level 3
-			read_only
+			shard_level 3
 		}
 	`)
 
@@ -43,6 +43,9 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 	if v.CacheMaxAge != "24h" {
 		t.Errorf("expected CacheMaxAge '24h', got '%s'", v.CacheMaxAge)
 	}
+	if v.CacheChunkSize != "4M" {
+		t.Errorf("expected CacheChunkSize '4M', got '%s'", v.CacheChunkSize)
+	}
 
 	// Test reflection-mapped integer options
 	if v.CacheChunkStreams != 4 {
@@ -55,13 +58,5 @@ func TestUnmarshalCaddyfile(t *testing.T) {
 	// Test reflection-mapped boolean flags
 	if !v.StripQuery {
 		t.Error("expected StripQuery to be true")
-	}
-	if !v.ReadOnly {
-		t.Error("expected ReadOnly to be true")
-	}
-
-	// Test defaults for things not in the Caddyfile
-	if v.FsName != "rclone-vfs" {
-		t.Errorf("expected default FsName 'rclone-vfs', got '%s'", v.FsName)
 	}
 }

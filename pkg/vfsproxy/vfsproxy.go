@@ -21,27 +21,21 @@ import (
 
 // Options holds configuration for the VFS proxy handler
 type Options struct {
-	FsName            string
-	CacheDir          string
-	CacheMaxAge       string
-	CacheMaxSize      string
-	CacheChunkSize    string
-	CacheChunkStreams int
-	StripQuery        bool
-	StripDomain       bool
-	ShardLevel        int
-	MetaCacheTTL      string
-	NoHead            bool
-	CacheMode         string
-	ReadOnly          bool
+	CacheDir          string `caddy:"cache_dir"`
+	CacheMaxAge       string `caddy:"max_age"`
+	CacheMaxSize      string `caddy:"max_size"`
+	CacheChunkSize    string `caddy:"chunk_size"`
+	CacheChunkStreams int    `caddy:"chunk_streams"`
+	CacheMode         string `caddy:"cache_mode"`
+	StripQuery        bool   `caddy:"strip_query"`
+	StripDomain       bool   `caddy:"strip_domain"`
+	ShardLevel        int    `caddy:"shard_level"`
 }
 
 // DefaultOptions returns Options with sensible defaults
 func DefaultOptions() Options {
 	return Options{
-		FsName:            "rclone-vfs",
 		ShardLevel:        1,
-		MetaCacheTTL:      "5m",
 		CacheChunkStreams: 2,
 		CacheMode:         "minimal",
 	}

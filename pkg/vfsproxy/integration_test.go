@@ -343,9 +343,7 @@ func TestCacheCleanup(t *testing.T) {
 func TestOptionsDefaults(t *testing.T) {
 	opt := DefaultOptions()
 
-	assert.Equal(t, "rclone-vfs", opt.FsName)
 	assert.Equal(t, 1, opt.ShardLevel)
-	assert.Equal(t, "5m", opt.MetaCacheTTL)
 	assert.Equal(t, 2, opt.CacheChunkStreams)
 	assert.Equal(t, "minimal", opt.CacheMode)
 }
