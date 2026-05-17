@@ -1,0 +1,81 @@
+package vfsproxy
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
+)
+
+// Compile-time check that remoteFile implements RemoteObject
+var _ vfscommon.RemoteObject = (*remoteFile)(nil)
+
+// remoteFile is an HTTP-backed RemoteObject used by the proxy
+// to fetch files from upstream URLs through the VFS cache.
+type remoteFile struct {
+	url     string
+	headers http.Header
+	size    int64
+	modTime time.Time
+	client  *http.Client
+}
+
+func newHTTPFile(url string, headers http.Header, size int64, modTime time.Time, client *http.Client) *remoteFile {
+	return &remoteFile{
+		url:     url,
+		headers: headers,
+		size:    size,
+		modTime: modTime,
+		client:  client,
+	}
+}
+
+// String returns the upstream URL
+func (f *remoteFile) String() string {
+	return f.url
+}
+
+// Size returns the file size, or -1 if unknown
+func (f *remoteFile) Size() int64 {
+	return f.size
+}
+
+// Open opens the remote file for reading, supporting Range requests
+// via vfscommon.RangeOption.
+func (f *remoteFile) Open(ctx context.Context, options ...vfscommon.OpenOption) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("remoteFile.Open: %w", err)
+	}
+
+	// Apply stored headers
+	for k, vv := range f.headers {
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+
+	// Apply open options (e.g., RangeOption)
+	for _, opt := range options {
+		if opt == nil {
+			continue
+		}
+		k, v := opt.Header()
+		req.Header.Set(k, v)
+	}
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("remoteFile.Open: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		resp.Body.Close()
+		return nil, fmt.Errorf("remoteFile.Open: %s (status %d)", resp.Status, resp.StatusCode)
+	}
+
+	return resp.Body, nil
+}

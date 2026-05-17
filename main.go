@@ -8,24 +8,39 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/tgdrive/rclone-vfs/pkg/vfsproxy"
 
-	"github.com/rclone/rclone/fs/config"
 	"github.com/spf13/pflag"
 )
 
 var (
 	port = pflag.String("port", "8080", "Port to listen on")
-	opt  = vfsproxy.DefaultOptions()
+	cacheDir = pflag.String("cache-dir", filepath.Join(os.TempDir(), "rclone_vfs_cache"), "Cache directory")
+	cacheMode = pflag.String("cache-mode", "minimal", "VFS cache mode (off, minimal, writes, full)")
+	chunkSize = pflag.String("chunk-size", "", "Chunk size for reading (e.g., 4M)")
+	chunkStreams = pflag.Int("chunk-streams", 2, "Number of parallel chunk streams")
+	stripQuery = pflag.Bool("strip-query", false, "Strip query parameters from URL for caching")
+	stripDomain = pflag.Bool("strip-domain", false, "Strip domain from URL for caching")
+	shardLevel = pflag.Int("shard-level", 1, "Number of shard levels for cache paths")
 )
 
 func main() {
-	opt.AddFlags(pflag.CommandLine)
 	pflag.Parse()
+
+	opt := vfsproxy.Options{
+		CacheDir:          *cacheDir,
+		CacheMode:         *cacheMode,
+		CacheChunkSize:    *chunkSize,
+		CacheChunkStreams: *chunkStreams,
+		StripQuery:        *stripQuery,
+		StripDomain:       *stripDomain,
+		ShardLevel:        *shardLevel,
+	}
 
 	handler, err := vfsproxy.NewHandler(opt)
 	if err != nil {
@@ -62,7 +77,7 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok","cache_mode":"%v","cache_dir":"%s"}`, handler.VFS.Opt.CacheMode, config.GetCacheDir())
+		fmt.Fprintf(w, `{"status":"ok","cache_dir":"%s"}`, handler.VFS.Opt.CacheDir)
 	})
 
 	srv := &http.Server{
@@ -77,7 +92,7 @@ func main() {
 	go func() {
 		log.Printf("VFS Proxy listening on :%s", *port)
 		log.Printf("VFS Cache Mode: %v", handler.VFS.Opt.CacheMode)
-		log.Printf("VFS Cache Dir: %s", config.GetCacheDir())
+		log.Printf("VFS Cache Dir: %s", handler.VFS.Opt.CacheDir)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %s\n", err)
 		}

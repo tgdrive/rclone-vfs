@@ -10,350 +10,323 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"reflect"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
-	_ "github.com/rclone/rclone/backend/local"
-	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/config"
-	"github.com/rclone/rclone/fs/config/configmap"
-	"github.com/rclone/rclone/fs/config/configstruct"
-	"github.com/rclone/rclone/vfs"
-	"github.com/rclone/rclone/vfs/vfscommon"
-	"github.com/spf13/pflag"
-	"github.com/tgdrive/rclone-vfs/backend/link"
+	"github.com/tgdrive/rclone-vfs/vfs"
+	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
 )
 
+// Options holds configuration for the VFS proxy handler
 type Options struct {
-	FsName            string `vfs:"-" flag:"fs-name" caddy:"fs_name" help:"The name of the VFS file system" default:"rclone-vfs"`
-	CacheDir          string `vfs:"-" flag:"cache-dir" caddy:"cache_dir" help:"Cache directory"`
-	CacheMaxAge       string `vfs:"vfs_cache_max_age" flag:"max-age" caddy:"max_age" help:"Max age of files in cache"`
-	CacheMaxSize      string `vfs:"vfs_cache_max_size" flag:"max-size" caddy:"max_size" help:"Max total size of objects in cache"`
-	CacheChunkSize    string `vfs:"vfs_read_chunk_size" flag:"chunk-size" caddy:"chunk_size" help:"Default Chunk size of read request"`
-	CacheChunkStreams int    `vfs:"vfs_read_chunk_streams" flag:"chunk-streams" caddy:"chunk_streams" help:"The number of parallel streams to read at once"`
-	StripQuery        bool   `vfs:"-" flag:"strip-query" caddy:"strip_query" help:"Strip query parameters from URL for caching"`
-	StripDomain       bool   `vfs:"-" flag:"strip-domain" caddy:"strip_domain" help:"Strip domain and protocol from URL for caching"`
-	ShardLevel        int    `vfs:"-" flag:"shard-level" caddy:"shard-level" help:"Number of shard levels" default:"1"`
-	MetaCacheTTL      string `vfs:"-" flag:"meta-cache-ttl" caddy:"meta_cache_ttl" help:"Metadata cache TTL (e.g., 5m, 1h, 24h)" default:"5m"`
-	NoHead            bool   `vfs:"-" flag:"no-head" caddy:"no_head" help:"Skip HEAD requests, use GET with Range instead"`
-
-	// Additional VFS Options
-	CacheMode         string `vfs:"vfs_cache_mode" flag:"cache-mode" caddy:"cache_mode" help:"VFS cache mode (off, minimal, writes, full)"`
-	WriteWait         string `vfs:"vfs_write_wait" flag:"write-wait" caddy:"write_wait" help:"VFS write wait time"`
-	ReadWait          string `vfs:"vfs_read_wait" flag:"read-wait" caddy:"read_wait" help:"VFS read wait time"`
-	WriteBack         string `vfs:"vfs_write_back" flag:"write-back" caddy:"write_back" help:"VFS write back time"`
-	DirCacheTime      string `vfs:"dir_cache_time" flag:"dir-cache-time" caddy:"dir_cache_time" help:"VFS directory cache time"`
-	FastFingerprint   bool   `vfs:"vfs_fast_fingerprint" flag:"fast-fingerprint" caddy:"fast_fingerprint" help:"Use fast fingerprinting"`
-	CacheMinFreeSpace string `vfs:"vfs_cache_min_free_space" flag:"min-free-space" caddy:"min_free_space" help:"VFS minimum free space in cache"`
-	CaseInsensitive   bool   `vfs:"vfs_case_insensitive" flag:"case-insensitive" caddy:"case_insensitive" help:"VFS case insensitive"`
-	ReadOnly          bool   `vfs:"read_only" flag:"read-only" caddy:"read_only" help:"VFS read only"`
-	NoModTime         bool   `vfs:"no_modtime" flag:"no-modtime" caddy:"no_modtime" help:"VFS no modtime"`
-	NoChecksum        bool   `vfs:"no_checksum" flag:"no-checksum" caddy:"no_checksum" help:"VFS no checksum"`
-	NoSeek            bool   `vfs:"no_seek" flag:"no-seek" caddy:"no_seek" help:"VFS no seek"`
-	DirPerms          string `vfs:"dir_perms" flag:"dir-perms" caddy:"dir_perms" help:"VFS directory permissions"`
-	FilePerms         string `vfs:"file_perms" flag:"file-perms" caddy:"file_perms" help:"VFS file permissions"`
+	FsName            string
+	CacheDir          string
+	CacheMaxAge       string
+	CacheMaxSize      string
+	CacheChunkSize    string
+	CacheChunkStreams int
+	StripQuery        bool
+	StripDomain       bool
+	ShardLevel        int
+	MetaCacheTTL      string
+	NoHead            bool
+	CacheMode         string
+	ReadOnly          bool
 }
 
-// AddFlags adds flags to the given FlagSet.
-func (opt *Options) AddFlags(fs *pflag.FlagSet) {
-	v := reflect.ValueOf(opt).Elem()
-	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		flagName := field.Tag.Get("flag")
-		if flagName == "" || flagName == "-" {
-			continue
-		}
-		help := field.Tag.Get("help")
-		f := v.Field(i)
-		switch f.Kind() {
-		case reflect.String:
-			fs.StringVar(f.Addr().Interface().(*string), flagName, f.String(), help)
-		case reflect.Int:
-			fs.IntVar(f.Addr().Interface().(*int), flagName, int(f.Int()), help)
-		case reflect.Bool:
-			fs.BoolVar(f.Addr().Interface().(*bool), flagName, f.Bool(), help)
-		}
-	}
-}
-
-// ToConfigMap converts Options to a rclone configmap.
-func (opt *Options) ToConfigMap() configmap.Simple {
-	m := configmap.Simple{}
-	v := reflect.ValueOf(opt).Elem()
-	t := v.Type()
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		tag := field.Tag.Get("vfs")
-		if tag == "" || tag == "-" {
-			continue
-		}
-		f := v.Field(i)
-		switch f.Kind() {
-		case reflect.String:
-			m[tag] = f.String()
-		case reflect.Int:
-			m[tag] = strconv.Itoa(int(f.Int()))
-		case reflect.Bool:
-			m[tag] = strconv.FormatBool(f.Bool())
-		}
-	}
-	return m
-}
-
-// DefaultOptions returns Options with sensible defaults applied from rclone and tags.
+// DefaultOptions returns Options with sensible defaults
 func DefaultOptions() Options {
-	var opt Options
-	optValue := reflect.ValueOf(&opt).Elem()
-	optType := optValue.Type()
-
-	// 1. Apply defaults from tags first
-	for i := 0; i < optType.NumField(); i++ {
-		field := optType.Field(i)
-		def := field.Tag.Get("default")
-		if def == "" {
-			continue
-		}
-		f := optValue.Field(i)
-		switch f.Kind() {
-		case reflect.String:
-			f.SetString(def)
-		case reflect.Int:
-			if val, err := strconv.Atoi(def); err == nil {
-				f.SetInt(int64(val))
-			}
-		case reflect.Bool:
-			f.SetBool(def == "true")
-		}
+	return Options{
+		FsName:            "rclone-vfs",
+		ShardLevel:        1,
+		MetaCacheTTL:      "5m",
+		CacheChunkStreams: 2,
+		CacheMode:         "minimal",
 	}
-
-	// 2. Fetch/Override defaults from rclone vfscommon.Opt
-	vfsOpt := vfscommon.Opt
-	items, err := configstruct.Items(&vfsOpt)
-	if err != nil {
-		return opt
-	}
-
-	for _, item := range items {
-		valStr, _ := configstruct.InterfaceToString(item.Value)
-		for i := 0; i < optType.NumField(); i++ {
-			field := optType.Field(i)
-			tag := field.Tag.Get("vfs")
-			if tag == item.Name {
-				f := optValue.Field(i)
-				switch f.Kind() {
-				case reflect.String:
-					f.SetString(valStr)
-				case reflect.Int:
-					if val, err := strconv.Atoi(valStr); err == nil {
-						f.SetInt(int64(val))
-					}
-				case reflect.Bool:
-					f.SetBool(valStr == "true")
-				}
-				break
-			}
-		}
-	}
-
-	return opt
 }
 
-type Handler struct {
-	VFS         *vfs.VFS
+// mapping tracks URL-to-cache-path mappings so the VFS knows
+// which upstream URL and headers to use for each cache path
+type mapping struct {
 	mu          sync.RWMutex
-	hashCache   map[string]string
+	entries     map[string]cacheEntry
+}
+
+type cacheEntry struct {
+	url     string
+	headers http.Header
+}
+
+func newMapping() *mapping {
+	return &mapping{entries: make(map[string]cacheEntry)}
+}
+
+func (m *mapping) put(url, cachePath string, headers http.Header) {
+	m.mu.Lock()
+	m.entries[cachePath] = cacheEntry{url: url, headers: headers.Clone()}
+	m.mu.Unlock()
+}
+
+func (m *mapping) get(cachePath string) (cacheEntry, bool) {
+	m.mu.RLock()
+	e, ok := m.entries[cachePath]
+	m.mu.RUnlock()
+	return e, ok
+}
+
+// Handler is the VFS proxy HTTP handler
+type Handler struct {
+	VFS  *vfs.VFS
+	mapping *mapping
+	client  *http.Client
+
 	stripQuery  bool
 	stripDomain bool
 	shardLevel  int
 }
 
+// NewHandler creates a new Handler
 func NewHandler(opt Options) (*Handler, error) {
 	ctx := context.Background()
 
-	m := configmap.Simple{
-		"type":         "link",
-		"strip_query":  strconv.FormatBool(opt.StripQuery),
-		"strip_domain": strconv.FormatBool(opt.StripDomain),
-		"shard_level":  strconv.Itoa(opt.ShardLevel),
-		"cache_ttl":    opt.MetaCacheTTL,
-		"no_head":      strconv.FormatBool(opt.NoHead),
+	cacheDir := opt.CacheDir
+	if cacheDir == "" {
+		cacheDir = filepath.Join(os.TempDir(), "rclone_vfs_cache")
 	}
 
-	// Create a new file system for the link backend
-	f, err := fs.NewFs(ctx, opt.FsName+":")
-	if err != nil {
-		// Fallback to manual creation if not in rclone config
-		f, err = link.NewFs(ctx, opt.FsName, "", m)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create link backend: %w", err)
+	// Build VFS options
+	vfsOpt := &vfscommon.Options{
+		CacheDir: cacheDir,
+	}
+
+	if opt.CacheMaxAge != "" {
+		d, err := time.ParseDuration(opt.CacheMaxAge)
+		if err == nil {
+			vfsOpt.CacheMaxAge = d
+		} else {
+			return nil, fmt.Errorf("invalid cache-max-age: %w", err)
 		}
 	}
-
-	// Configure VFS options
-	vfsOpt := vfscommon.Opt
-	optMap := opt.ToConfigMap()
-
-	if err := configstruct.Set(optMap, &vfsOpt); err != nil {
-		return nil, fmt.Errorf("failed to parse VFS options: %w", err)
+	if opt.CacheMaxSize != "" {
+		s, err := parseSize(opt.CacheMaxSize)
+		if err == nil {
+			vfsOpt.CacheMaxSize = s
+		}
 	}
-	vfsOpt.Init() // Initialize options (sets up permissions, etc.)
-
-	actualCacheDir := opt.CacheDir
-	if actualCacheDir == "" {
-		actualCacheDir = filepath.Join(os.TempDir(), "rclone_vfs_cache")
+	if opt.CacheChunkSize != "" {
+		s, err := parseSize(opt.CacheChunkSize)
+		if err == nil {
+			vfsOpt.ChunkSize = s
+		}
 	}
-	if err := config.SetCacheDir(actualCacheDir); err != nil {
-		return nil, fmt.Errorf("failed to set cache directory: %w", err)
+	vfsOpt.ChunkStreams = opt.CacheChunkStreams
+
+	switch strings.ToLower(opt.CacheMode) {
+	case "off":
+		vfsOpt.CacheMode = vfscommon.CacheModeOff
+	case "minimal":
+		vfsOpt.CacheMode = vfscommon.CacheModeMinimal
+	case "writes":
+		vfsOpt.CacheMode = vfscommon.CacheModeWrites
+	case "full":
+		vfsOpt.CacheMode = vfscommon.CacheModeFull
+	default:
+		vfsOpt.CacheMode = vfscommon.CacheModeMinimal
 	}
 
-	vfsInstance := vfs.New(f, &vfsOpt)
+	vfsOpt.Init()
+
+	vfsInstance, err := vfs.New(ctx, vfsOpt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create VFS: %w", err)
+	}
+
 	return &Handler{
 		VFS:         vfsInstance,
-		hashCache:   make(map[string]string),
+		mapping:     newMapping(),
+		client:      &http.Client{Timeout: 30 * time.Second},
 		stripQuery:  opt.StripQuery,
 		stripDomain: opt.StripDomain,
 		shardLevel:  opt.ShardLevel,
 	}, nil
 }
 
+// Shutdown shuts down the handler
 func (h *Handler) Shutdown() {
-	h.VFS.Shutdown()
+	h.VFS.Close()
 }
 
-var maxHashCacheEntries = 10000
-
-func (h *Handler) getFileHash(targetURL string) string {
-	h.mu.RLock()
-	fileHash, exists := h.hashCache[targetURL]
-	h.mu.RUnlock()
-
-	if exists {
-		return fileHash
+// hashCachePath computes a cache path from a URL
+func (h *Handler) hashCachePath(targetURL string) string {
+	keyURL := targetURL
+	if h.stripQuery {
+		if idx := strings.Index(keyURL, "?"); idx >= 0 {
+			keyURL = keyURL[:idx]
+		}
+	}
+	if h.stripDomain {
+		if idx := strings.Index(keyURL, "://"); idx >= 0 {
+			rest := keyURL[idx+3:]
+			if slashIdx := strings.Index(rest, "/"); slashIdx >= 0 {
+				rest = rest[slashIdx:]
+			} else {
+				rest = "/"
+			}
+			keyURL = rest
+		}
 	}
 
-	// Apply stripping to the URL before hashing
-	keyURL := link.StripURL(targetURL, h.stripQuery, h.stripDomain)
+	hash := fmt.Sprintf("%x", md5.Sum([]byte(keyURL)))
 
-	hashBytes := md5.Sum([]byte(keyURL))
-	computedHash := fmt.Sprintf("%x", hashBytes)
-
-	// Double-checked locking to avoid duplicate computation
-	h.mu.Lock()
-	if fileHash, exists = h.hashCache[targetURL]; exists {
-		h.mu.Unlock()
-		return fileHash
+	if h.shardLevel > 0 {
+		sharded := ""
+		for i := 0; i < h.shardLevel && i*2 < len(hash); i++ {
+			sharded += string(hash[i*2]) + string(hash[i*2+1]) + "/"
+		}
+		return sharded + hash
 	}
-
-	// Evict entire cache if it exceeds the limit (simple bounded map)
-	if len(h.hashCache) >= maxHashCacheEntries {
-		h.hashCache = make(map[string]string, maxHashCacheEntries/2)
-	}
-	h.hashCache[targetURL] = computedHash
-	h.mu.Unlock()
-
-	return computedHash
+	return hash
 }
 
-// requestHeadersToFilter lists headers that are per-request and must NOT be
-// stored in the shared urlMap. They would corrupt VFS internal reads (caching,
-// chunk fetching, metadata HEAD requests) if forwarded to the upstream.
-// http.ServeContent in ServeFile reads these directly from the request.
-var requestHeadersToFilter = []string{
-	"Range",
-	"If-Range",
-	"If-Modified-Since",
-	"If-Unmodified-Since",
-	"If-None-Match",
-	"If-Match",
-}
-
-// filterRequestHeaders removes per-request headers from a clone so that only
-// headers stable across requests (auth, content negotiation, etc.) are stored
-// in the shared urlMap for VFS upstream operations.
-func filterRequestHeaders(h http.Header) http.Header {
-	filtered := h.Clone()
-	for _, key := range requestHeadersToFilter {
-		filtered.Del(key)
-	}
-	return filtered
-}
-
+// Serve handles an HTTP request for the given targetURL.
+//
+// It opens the file through the VFS cache, associating it with the
+// upstream URL so that the VFS can fetch the file on cache misses.
 func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string) {
 	if targetURL == "" {
 		http.Error(w, "Target URL is required", http.StatusBadRequest)
 		return
 	}
 
-	fileHash := h.getFileHash(targetURL)
+	cachePath := h.hashCachePath(targetURL)
 
-	// Store stable headers only — per-request headers (Range, If-*) are
-	// filtered out to prevent corrupting VFS internal upstream requests.
-	link.Register(fileHash, targetURL, filterRequestHeaders(r.Header))
-
-	h.ServeFile(w, r, link.ShardedPath(fileHash, h.shardLevel))
-}
-
-func (h *Handler) ServeFile(w http.ResponseWriter, r *http.Request, remote string) {
-	ctx := r.Context()
-	node, err := h.VFS.Stat(remote)
-	if err == vfs.ENOENT {
-		fs.Infof(remote, "%s: File not found", r.RemoteAddr)
-		http.Error(w, "File not found", http.StatusNotFound)
-		return
-	} else if err != nil {
-		http.Error(w, "Failed to find file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !node.IsFile() {
-		http.Error(w, "Not a file", http.StatusNotFound)
-		return
+	// Build upstream headers by combining request headers (minus per-request ones)
+	upstreamHeaders := make(http.Header)
+	for k, vv := range r.Header {
+		switch k {
+		case "Range", "If-Range", "If-Modified-Since", "If-Unmodified-Since", "If-None-Match", "If-Match":
+			continue
+		}
+		for _, v := range vv {
+			upstreamHeaders.Add(k, v)
+		}
 	}
 
-	entry := node.DirEntry()
-	if entry == nil {
-		http.Error(w, "Can't open file being written", http.StatusNotFound)
-		return
-	}
-	obj := entry.(fs.Object)
-	file := node.(*vfs.File)
+	h.mapping.put(targetURL, cachePath, upstreamHeaders)
 
-	knownSize := obj.Size() >= 0
-	if knownSize {
-		w.Header().Set("Content-Length", strconv.FormatInt(node.Size(), 10))
-	}
+	// Create an httpFile to associate with this cache path
+	httpFile := h.newHTTPFile(cachePath)
 
-	mimeType := fs.MimeType(ctx, obj)
-	if mimeType == "" && path.Ext(remote) != "" {
-		mimeType = mime.TypeByExtension(path.Ext(remote))
-	}
-	if mimeType != "" && (mimeType != "application/octet-stream" || path.Ext(remote) != "") {
-		w.Header().Set("Content-Type", mimeType)
-	}
-	w.Header().Set("Last-Modified", file.ModTime().UTC().Format(http.TimeFormat))
-
-	// open the object
-	in, err := file.Open(os.O_RDONLY)
+	// Open through VFS cache with the httpFile
+	fh, err := h.VFS.OpenCached(cachePath, httpFile)
 	if err != nil {
 		http.Error(w, "Failed to open file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer func() {
-		_ = in.Close()
-	}()
+	defer fh.Close()
 
-	if knownSize {
-		http.ServeContent(w, r, remote, file.ModTime(), in)
+	// Get file info
+	info, err := fh.Stat()
+	if err != nil {
+		http.Error(w, "Failed to stat file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	size := info.Size()
+	modTime := info.ModTime()
+
+	// Set response headers
+	if size >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	mimeType := mime.TypeByExtension(path.Ext(cachePath))
+	if mimeType != "" {
+		w.Header().Set("Content-Type", mimeType)
+	}
+	if !modTime.IsZero() {
+		w.Header().Set("Last-Modified", modTime.UTC().Format(http.TimeFormat))
+	}
+
+	// Serve content (handles Range requests via http.ServeContent)
+	if size >= 0 {
+		http.ServeContent(w, r, cachePath, modTime, fh)
 	} else {
-		if rangeRequest := r.Header.Get("Range"); rangeRequest != "" {
-			http.Error(w, "Can't use Range: on files of unknown length", http.StatusRequestedRangeNotSatisfiable)
+		if r.Header.Get("Range") != "" {
+			http.Error(w, "Cannot use Range on files of unknown length", http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
-		n, err := io.Copy(w, in)
-		if err != nil {
-			fs.Errorf(obj, "Didn't finish writing GET request (wrote %d/unknown bytes): %v", n, err)
-			return
+		io.Copy(w, fh)
+	}
+}
+
+// newHTTPFile creates an httpFile for the given cache path, looking up
+// the upstream URL and headers from the mapping.
+func (h *Handler) newHTTPFile(cachePath string) *remoteFile {
+	entry, ok := h.mapping.get(cachePath)
+	if !ok {
+		return &remoteFile{size: -1}
+	}
+
+	// First do a HEAD request to get metadata
+	size := int64(-1)
+	modTime := time.Time{}
+
+	req, err := http.NewRequest("HEAD", entry.url, nil)
+	if err == nil {
+		for k, vv := range entry.headers {
+			for _, v := range vv {
+				req.Header.Add(k, v)
+			}
+		}
+		resp, err := h.client.Do(req)
+		if err == nil {
+			if resp.StatusCode == http.StatusOK {
+				if cl := resp.Header.Get("Content-Length"); cl != "" {
+					if parsed, err := strconv.ParseInt(cl, 10, 64); err == nil {
+						size = parsed
+					}
+				}
+				if lm := resp.Header.Get("Last-Modified"); lm != "" {
+					if parsed, err := http.ParseTime(lm); err == nil {
+						modTime = parsed
+					}
+				}
+			}
+			resp.Body.Close()
 		}
 	}
+
+	return newHTTPFile(entry.url, entry.headers, size, modTime, h.client)
+}
+
+// parseSize parses a size string like "100M", "1G", etc.
+func parseSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+
+	multiplier := int64(1)
+	switch s[len(s)-1] {
+	case 'k', 'K':
+		multiplier = 1 << 10
+		s = s[:len(s)-1]
+	case 'M', 'm':
+		multiplier = 1 << 20
+		s = s[:len(s)-1]
+	case 'G', 'g':
+		multiplier = 1 << 30
+		s = s[:len(s)-1]
+	case 'T', 't':
+		multiplier = 1 << 40
+		s = s[:len(s)-1]
+	}
+
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size: %w", err)
+	}
+	return v * multiplier, nil
 }
