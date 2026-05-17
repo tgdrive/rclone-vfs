@@ -130,7 +130,6 @@ type Engine struct {
 	Opt         types.Options
 	cache       *cache.Cache
 	cancel      context.CancelFunc
-	cancelCache context.CancelFunc
 	usageMu     sync.Mutex
 	usageTime   time.Time
 	pollChan    chan time.Duration
@@ -163,8 +162,6 @@ func New(ctx context.Context, opt *types.Options) (*Engine, error) {
 	// Create root directory
 	eng.root = newDir(eng, nil, "/")
 
-	eng.SetCacheMode(eng.Opt.CacheMode)
-
 	return eng, nil
 }
 
@@ -174,29 +171,9 @@ var (
 	active   = map[string][]*Engine{}
 )
 
-// SetCacheMode sets the cache mode
-func (e *Engine) SetCacheMode(cacheMode types.CacheMode) {
-	e.Opt.CacheMode = cacheMode
-
-	switch cacheMode {
-	case types.CacheModeFull, types.CacheModeWrites:
-		ctx, cancel := context.WithCancel(e.ctx)
-		e.cancelCache = cancel
-		ccache, err := cache.New(ctx, &e.Opt, e.addVirtual)
-		if err == nil {
-			e.cache = ccache
-		}
-	default:
-		if e.cancelCache != nil {
-			e.cancelCache()
-			e.cancelCache = nil
-		}
-	}
-}
-
 // addVirtual is called when the cache creates a virtual entry
 func (e *Engine) addVirtual(remote string, size int64, isDir bool) error {
-	// In our fork, we don't create virtual entries in the VFS tree
+	// In our fork, we don't create virtual entries in the engine tree
 	// This is a simplified no-op
 	return nil
 }
@@ -214,11 +191,6 @@ func (e *Engine) Usage() (total, used int64) {
 	return 0, 0
 }
 
-// Cache returns the cache object
-func (e *Engine) Cache() *cache.Cache {
-	return e.cache
-}
-
 // Context returns the Engine context
 func (e *Engine) Context() context.Context {
 	return e.ctx
@@ -233,9 +205,6 @@ func (e *Engine) OpenFile(name string) (Handle, error) {
 
 // Close shuts down the Engine
 func (e *Engine) Close() error {
-	if e.cancelCache != nil {
-		e.cancelCache()
-	}
 	if e.cache != nil {
 		_ = e.cache.CleanUp()
 	}
@@ -297,7 +266,7 @@ func (e *Engine) OpenCached(filePath string, obj types.RemoteObject) (Handle, er
 		}
 	}
 
-	// Ensure the file node exists in the VFS tree
+	// Ensure the file node exists in the engine tree
 	_, err := e.root.Stat(filePath)
 	if err != nil {
 		d := e.root
@@ -314,4 +283,22 @@ func (e *Engine) OpenCached(filePath string, obj types.RemoteObject) (Handle, er
 // CacheItem returns the cache item for a path, creating it if needed
 func (e *Engine) CacheItem(path string) *cache.Item {
 	return e.cache.Item(path)
+}
+
+// Remove removes an item from the cache by name.
+// Returns nil on success. If the cache is nil, returns nil.
+func (e *Engine) Remove(name string) error {
+	if e.cache == nil {
+		return nil
+	}
+	e.cache.Remove(name)
+	return nil
+}
+
+// Stats returns cache statistics from the underlying cache engine.
+func (e *Engine) Stats() map[string]interface{} {
+	if e.cache == nil {
+		return map[string]interface{}{}
+	}
+	return e.cache.Stats()
 }

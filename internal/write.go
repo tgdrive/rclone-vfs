@@ -1,11 +1,11 @@
 package internal
 
-// WriteFileHandle is not yet implemented in the forked VFS.
+// WriteFileHandle is not yet implemented in the forked engine.
 type WriteFileHandle struct {
 	*baseHandle
 }
 
-// RWFileHandle is not yet implemented in the forked VFS.
+// RWFileHandle is not yet implemented in the forked engine.
 type RWFileHandle struct {
 	*baseHandle
 }

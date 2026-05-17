@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/md5"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -19,6 +20,47 @@ import (
 	"github.com/tgdrive/varc/internal/types"
 )
 
+// Metrics tracks cache proxy performance counters.
+type Metrics struct {
+	mu   sync.Mutex
+	Requests        int64 `json:"requests"`
+	Hits            int64 `json:"hits"`
+	Misses          int64 `json:"misses"`
+	BytesServed     int64 `json:"bytes_served"`
+	BytesFromUpstream int64 `json:"bytes_from_upstream"`
+	Purges          int64 `json:"purges"`
+}
+
+// Snapshot returns a copy of the current metrics as a map.
+func (m *Metrics) Snapshot() map[string]int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return map[string]int64{
+		"requests":            m.Requests,
+		"hits":                m.Hits,
+		"misses":              m.Misses,
+		"bytes_served":        m.BytesServed,
+		"bytes_from_upstream": m.BytesFromUpstream,
+		"purges":              m.Purges,
+	}
+}
+
+// inc atomically increments a counter.
+func (m *Metrics) inc(field *int64) {
+	m.mu.Lock()
+	*field++
+	m.mu.Unlock()
+}
+
+// add atomically adds to a counter.
+func (m *Metrics) add(field *int64, n int64) {
+	m.mu.Lock()
+	*field += n
+	m.mu.Unlock()
+}
+
+
+
 // Options holds configuration for the cache proxy handler
 type Options struct {
 	CacheDir          string       `caddy:"cache_dir"`
@@ -26,10 +68,10 @@ type Options struct {
 	CacheMaxSize      string       `caddy:"max_size"`
 	CacheChunkSize    string       `caddy:"chunk_size"`
 	CacheChunkStreams int          `caddy:"chunk_streams"`
-	CacheMode         string       `caddy:"cache_mode"`
 	StripQuery        bool         `caddy:"strip_query"`
 	StripDomain       bool         `caddy:"strip_domain"`
 	ShardLevel        int          `caddy:"shard_level"`
+	Passthrough       bool         `caddy:"passthrough"`
 	Logger            types.Logger `caddy:"-"`
 }
 
@@ -38,15 +80,14 @@ func DefaultOptions() Options {
 	return Options{
 		ShardLevel:        1,
 		CacheChunkStreams: 2,
-		CacheMode:         "minimal",
 	}
 }
 
-// mapping tracks URL-to-cache-path mappings so the VFS knows
+// mapping tracks URL-to-cache-path mappings so the cache engine knows
 // which upstream URL and headers to use for each cache path
 type mapping struct {
-	mu          sync.RWMutex
-	entries     map[string]cacheEntry
+	mu      sync.RWMutex
+	entries map[string]cacheEntry
 }
 
 type cacheEntry struct {
@@ -73,13 +114,15 @@ func (m *mapping) get(cachePath string) (cacheEntry, bool) {
 
 // Handler is the cache proxy HTTP handler
 type Handler struct {
-	Engine *internal.Engine
-	mapping *mapping
-	client  *http.Client
+	Engine      *internal.Engine
+	mapping     *mapping
+	client      *http.Client
+	metrics     *Metrics
 
 	stripQuery  bool
 	stripDomain bool
 	shardLevel  int
+	passthrough bool
 }
 
 // NewHandler creates a new Handler
@@ -122,19 +165,6 @@ func NewHandler(opt Options) (*Handler, error) {
 	}
 	engOpt.ChunkStreams = opt.CacheChunkStreams
 
-	switch strings.ToLower(opt.CacheMode) {
-	case "off":
-		engOpt.CacheMode = types.CacheModeOff
-	case "minimal":
-		engOpt.CacheMode = types.CacheModeMinimal
-	case "writes":
-		engOpt.CacheMode = types.CacheModeWrites
-	case "full":
-		engOpt.CacheMode = types.CacheModeFull
-	default:
-		engOpt.CacheMode = types.CacheModeMinimal
-	}
-
 	engOpt.Init()
 
 	engInstance, err := internal.New(ctx, engOpt)
@@ -146,15 +176,35 @@ func NewHandler(opt Options) (*Handler, error) {
 		Engine:      engInstance,
 		mapping:     newMapping(),
 		client:      &http.Client{Timeout: 30 * time.Second},
+		metrics:     &Metrics{},
 		stripQuery:  opt.StripQuery,
 		stripDomain: opt.StripDomain,
 		shardLevel:  opt.ShardLevel,
+		passthrough: opt.Passthrough,
 	}, nil
 }
 
 // Shutdown shuts down the handler
 func (h *Handler) Shutdown() {
 	h.Engine.Close()
+}
+
+// Metrics returns a reference to the handler's metrics collector
+func (h *Handler) Metrics() *Metrics {
+	return h.metrics
+}
+
+// ServeMetrics writes a JSON snapshot of the current metrics to w
+func (h *Handler) ServeMetrics(w http.ResponseWriter) {
+	stats := h.metrics.Snapshot()
+	engineStats := h.Engine.Stats()
+	for k, v := range engineStats {
+		if vi, ok := v.(int64); ok {
+			stats[k] = vi
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
 }
 
 // hashCachePath computes a cache path from a URL
@@ -189,10 +239,120 @@ func (h *Handler) hashCachePath(targetURL string) string {
 	return hash
 }
 
+// shouldPassthrough returns true if the request should bypass the cache
+func (h *Handler) shouldPassthrough(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	}
+	if r.Header.Get("Authorization") != "" {
+		return true
+	}
+	if r.Header.Get("Cookie") != "" {
+		return true
+	}
+	return false
+}
+
+// proxyDirect proxies a request directly to the upstream without caching
+func (h *Handler) proxyDirect(w http.ResponseWriter, r *http.Request, targetURL string) {
+	req, err := http.NewRequest(r.Method, targetURL, r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// Copy original headers
+	for k, vv := range r.Header {
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	// Copy response headers
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// handlePurge handles PURGE requests to remove items from cache
+func (h *Handler) handlePurge(w http.ResponseWriter, r *http.Request, targetURL string) {
+	cachePath := h.hashCachePath(targetURL)
+
+	// Remove from mapping
+	h.mapping.mu.Lock()
+	delete(h.mapping.entries, cachePath)
+	h.mapping.mu.Unlock()
+
+	// Remove from cache
+	err := h.Engine.Remove(cachePath)
+	if err != nil {
+		http.Error(w, "Purge failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	h.metrics.mu.Lock()
+	h.metrics.Purges++
+	h.metrics.mu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Purged"))
+}
+
+// tryStaleServe attempts to serve stale data from cache when upstream is unavailable.
+// Returns true if stale data was served.
+func (h *Handler) tryStaleServe(w http.ResponseWriter, r *http.Request, cachePath string) bool {
+	item := h.Engine.CacheItem(cachePath)
+	if item == nil || !item.Exists() {
+		return false
+	}
+
+	// Open cached file handle (no upstream fetch)
+	fh, err := h.Engine.OpenCached(cachePath, nil)
+	if err != nil {
+		return false
+	}
+	defer fh.Close()
+
+	info, _ := fh.Stat()
+	size := info.Size()
+	modTime := info.ModTime()
+
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("X-Cache", "STALE")
+	if !modTime.IsZero() {
+		w.Header().Set("Last-Modified", modTime.UTC().Format(http.TimeFormat))
+	}
+
+	if size >= 0 {
+		http.ServeContent(w, r, cachePath, modTime, fh)
+	} else {
+		io.Copy(w, fh)
+	}
+	return true
+}
+
+// accessLog logs an HTTP request to the engine's logger if available
+func (h *Handler) accessLog(r *http.Request, status int, size int64, duration time.Duration) {
+	if h.Engine != nil && h.Engine.Opt.Logger != nil {
+		h.Engine.Opt.Logger.Infof("[proxy] %s %s %d %d %v", r.Method, r.URL.String(), status, size, duration)
+	}
+}
+
 // Serve handles an HTTP request for the given targetURL.
 //
-// It opens the file through the VFS cache, associating it with the
-// upstream URL so that the VFS can fetch the file on cache misses.
+// It opens the file through the disk cache, associating it with the
+// upstream URL so that the cache engine can fetch the file on cache misses.
+// Supports PURGE, conditional requests (If-Modified-Since, If-None-Match),
+// passthrough for non-GET methods, and stale-serve on upstream errors.
 func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string) {
 	if targetURL == "" {
 		http.Error(w, "Target URL is required", http.StatusBadRequest)
@@ -200,6 +360,21 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string
 	}
 
 	cachePath := h.hashCachePath(targetURL)
+	start := time.Now()
+
+	// Handle PURGE requests
+	if r.Method == "PURGE" {
+		h.handlePurge(w, r, targetURL)
+		h.accessLog(r, http.StatusOK, 0, time.Since(start))
+		return
+	}
+
+	// Check if request should bypass cache
+	if h.passthrough || h.shouldPassthrough(r) {
+		h.proxyDirect(w, r, targetURL)
+		h.accessLog(r, http.StatusOK, 0, time.Since(start))
+		return
+	}
 
 	// Build upstream headers by combining request headers (minus per-request ones)
 	upstreamHeaders := make(http.Header)
@@ -218,9 +393,30 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string
 	// Create an httpFile to associate with this cache path
 	httpFile := h.newHTTPFile(cachePath)
 
-	// Open through VFS cache with the httpFile
-	fh, err := 	h.Engine.OpenCached(cachePath, httpFile)
+	// Track cache hit/miss
+	cachedItem := h.Engine.CacheItem(cachePath)
+	isCached := cachedItem.Exists()
+
+	h.metrics.mu.Lock()
+	h.metrics.Requests++
+	if isCached {
+		h.metrics.Hits++
+	} else {
+		h.metrics.Misses++
+	}
+	h.metrics.mu.Unlock()
+
+	// Open through disk cache with the httpFile
+	fh, err := h.Engine.OpenCached(cachePath, httpFile)
 	if err != nil {
+		// Try stale-serve if upstream is unavailable
+		if h.tryStaleServe(w, r, cachePath) {
+			h.metrics.mu.Lock()
+			h.metrics.Hits++
+			h.metrics.mu.Unlock()
+			h.accessLog(r, http.StatusOK, 0, time.Since(start))
+			return
+		}
 		http.Error(w, "Failed to open file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -235,6 +431,24 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string
 
 	size := info.Size()
 	modTime := info.ModTime()
+
+	// Handle conditional requests
+	if !modTime.IsZero() {
+		if t, err := http.ParseTime(r.Header.Get("If-Modified-Since")); err == nil && !modTime.After(t) {
+			w.WriteHeader(http.StatusNotModified)
+			h.accessLog(r, http.StatusNotModified, 0, time.Since(start))
+			return
+		}
+	}
+	if !modTime.IsZero() && size >= 0 {
+		etag := fmt.Sprintf(`"%s-%x"`, cachePath, size)
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			h.accessLog(r, http.StatusNotModified, 0, time.Since(start))
+			return
+		}
+	}
 
 	// Set response headers
 	if size >= 0 {
@@ -258,6 +472,12 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, targetURL string
 		}
 		io.Copy(w, fh)
 	}
+
+	// Access log and metrics
+	h.metrics.mu.Lock()
+	h.metrics.BytesServed += size
+	h.metrics.mu.Unlock()
+	h.accessLog(r, http.StatusOK, size, time.Since(start))
 }
 
 // newHTTPFile creates an httpFile for the given cache path, looking up

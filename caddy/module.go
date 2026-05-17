@@ -2,12 +2,14 @@ package varc
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/url"
 	"reflect"
 	"runtime/debug"
 	"strconv"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -20,21 +22,21 @@ import (
 
 func init() {
 	caddy.RegisterModule(Handler{})
-	httpcaddyfile.RegisterHandlerDirective("vfs", parseCaddyfile)
+	httpcaddyfile.RegisterHandlerDirective("varc", parseCaddyfile)
 
-	// Register directive order so vfs runs before reverse_proxy
-	httpcaddyfile.RegisterDirectiveOrder("vfs", httpcaddyfile.Before, "reverse_proxy")
+	// Register directive order so varc runs before reverse_proxy
+	httpcaddyfile.RegisterDirectiveOrder("varc", httpcaddyfile.Before, "reverse_proxy")
 }
 
 // Handler implements a Caddy HTTP handler that proxies requests through the varc cache.
 type Handler struct {
-	// Upstream is the base URL to proxy requests to (required).
+	// Upstream is the base URL to proxy requests to. If empty, the target
+	// URL is resolved from the request (query param "url" or base64-encoded path).
 	Upstream string `json:"upstream,omitempty"`
 
-	// Passthrough controls whether to call the next handler on 404.
-	// If true, when a file is not found, the next handler in the chain is called.
-	// If false (default), a 404 response is returned immediately.
-	Passthrough bool `json:"passthrough,omitempty"`
+	// MetricsPath sets an optional path where cache metrics are served.
+	// Example: "/varc/metrics"
+	MetricsPath string `json:"metrics_path,omitempty"`
 
 	proxy.Options
 
@@ -46,7 +48,7 @@ type Handler struct {
 // CaddyModule returns the Caddy module information.
 func (Handler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "http.handlers.vfs",
+		ID:  "http.handlers.varc",
 		New: func() caddy.Module {
 			return &Handler{
 				Options: proxy.DefaultOptions(),
@@ -59,12 +61,14 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 func (h *Handler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger(h)
 
-	// Parse upstream URL once during provisioning
-	parsedURL, err := url.Parse(h.Upstream)
-	if err != nil {
-		return fmt.Errorf("invalid upstream URL: %w", err)
+	// Parse upstream URL if configured
+	if h.Upstream != "" {
+		parsedURL, err := url.Parse(h.Upstream)
+		if err != nil {
+			return fmt.Errorf("invalid upstream URL: %w", err)
+		}
+		h.upstreamURL = parsedURL
 	}
-	h.upstreamURL = parsedURL
 
 	handler, err := proxy.NewHandler(h.Options)
 	if err != nil {
@@ -72,33 +76,29 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 
 	h.handler = handler
-	h.logger.Info("cache handler provisioned",
-		zap.String("upstream", h.Upstream),
-		zap.String("cache_mode", h.CacheMode),
-		zap.String("cache_dir", h.CacheDir),
-	)
+
+	if h.Upstream != "" {
+		h.logger.Info("cache handler provisioned",
+			zap.String("upstream", h.Upstream),
+			zap.String("cache_dir", h.CacheDir),
+		)
+	} else {
+		h.logger.Info("cache handler provisioned (dynamic upstream)",
+			zap.String("cache_dir", h.CacheDir),
+		)
+	}
 	return nil
 }
 
 // Validate ensures the configuration is valid.
 func (h *Handler) Validate() error {
-	if h.Upstream == "" {
-		return fmt.Errorf("upstream URL is required")
-	}
-
-	// Validate upstream URL format
-	if h.upstreamURL == nil {
-		return fmt.Errorf("upstream URL was not parsed")
-	}
-	if h.upstreamURL.Scheme != "http" && h.upstreamURL.Scheme != "https" {
-		return fmt.Errorf("upstream URL must use http or https scheme, got %q", h.upstreamURL.Scheme)
-	}
-
-	// Validate cache_mode if provided
-	if h.CacheMode != "" {
-		validModes := map[string]bool{"off": true, "minimal": true, "writes": true, "full": true}
-		if !validModes[h.CacheMode] {
-			return fmt.Errorf("invalid cache_mode %q: must be one of off, minimal, writes, full", h.CacheMode)
+	// Validate upstream URL if configured
+	if h.Upstream != "" {
+		if h.upstreamURL == nil {
+			return fmt.Errorf("upstream URL was not parsed")
+		}
+		if h.upstreamURL.Scheme != "http" && h.upstreamURL.Scheme != "https" {
+			return fmt.Errorf("upstream URL must use http or https scheme, got %q", h.upstreamURL.Scheme)
 		}
 	}
 
@@ -121,11 +121,14 @@ func (h *Handler) Cleanup() error {
 
 // ServeHTTP serves the HTTP request through the cache proxy.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	// Build full URL using url.JoinPath for proper path handling
-	fullURL := h.upstreamURL.JoinPath(r.URL.Path).String()
-	if r.URL.RawQuery != "" {
-		fullURL += "?" + r.URL.RawQuery
+	// Serve metrics endpoint if configured
+	if h.MetricsPath != "" && r.URL.Path == h.MetricsPath {
+		h.handler.ServeMetrics(w)
+		return nil
 	}
+
+	// Resolve the target URL
+	targetURL := h.resolveTargetURL(r)
 
 	// Wrap in panic recovery
 	defer func() {
@@ -147,15 +150,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			return status == http.StatusNotFound
 		}
 		rec := caddyhttp.NewResponseRecorder(w, buf, shouldBuffer)
-		h.handler.Serve(rec, r, fullURL)
+		h.handler.Serve(rec, r, targetURL)
 		if rec.Buffered() {
 			return next.ServeHTTP(w, r)
 		}
 		return nil
 	}
 
-	h.handler.Serve(w, r, fullURL)
+	h.handler.Serve(w, r, targetURL)
 	return nil
+}
+
+// resolveTargetURL resolves the upstream URL from the configured upstream
+// or from the request itself (query param or base64 path).
+func (h *Handler) resolveTargetURL(r *http.Request) string {
+	if h.upstreamURL != nil {
+		// Static upstream: build URL from upstream base + request path
+		fullURL := h.upstreamURL.JoinPath(r.URL.Path).String()
+		if r.URL.RawQuery != "" {
+			fullURL += "?" + r.URL.RawQuery
+		}
+		return fullURL
+	}
+
+	// Dynamic upstream: resolve from request
+	if targetURL := r.URL.Query().Get("url"); targetURL != "" {
+		return targetURL
+	}
+
+	// Check for Base64 URL in path (like standalone mode)
+	if strings.HasPrefix(r.URL.Path, "/stream/") {
+		encodedURL := strings.TrimPrefix(r.URL.Path, "/stream/")
+		if decoded, err := base64.RawURLEncoding.DecodeString(encodedURL); err == nil {
+			return string(decoded)
+		}
+		if decoded, err := base64.URLEncoding.DecodeString(encodedURL); err == nil {
+			return string(decoded)
+		}
+	}
+
+	return ""
 }
 
 // parseCaddyfile parses the Caddyfile configuration.
@@ -170,11 +204,9 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 // UnmarshalCaddyfile sets up the handler from Caddyfile tokens.
 func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
+		// First positional arg is upstream (optional)
 		if d.NextArg() {
 			h.Upstream = d.Val()
-		}
-		if h.Upstream == "" {
-			return d.Err("missing upstream URL")
 		}
 
 		for d.NextBlock(0) {
@@ -183,6 +215,18 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			switch directive {
 			case "passthrough":
 				h.Passthrough = true
+				continue
+			case "metrics":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				h.MetricsPath = d.Val()
+				continue
+			case "upstream":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				h.Upstream = d.Val()
 				continue
 			}
 

@@ -25,7 +25,7 @@ func (o *RangeOption) Header() (key, value string) {
 }
 
 // RemoteObject is the interface that a remote HTTP file must satisfy.
-// This replaces the rclone fs.Object interface in the forked VFS.
+// This replaces the rclone fs.Object interface in the forked engine.
 type RemoteObject interface {
 	// Open opens the remote file for reading with the given options.
 	// Options typically include RangeOption for seeking.

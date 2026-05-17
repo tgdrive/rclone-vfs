@@ -58,7 +58,7 @@ type Item struct {
 	c               *Cache                   // cache this is part of
 	mu              sync.Mutex               // protect the variables
 	cond            sync.Cond                // synchronize with cache cleaner
-	name            string                   // name in the VFS
+	name            string                   // name in the cache
 	opens           int                      // number of times file is open
 	downloaders     *downloaders.Downloaders // a record of the downloaders in action - may be nil
 	o               types.RemoteObject   // object we are caching - may be nil
@@ -402,7 +402,7 @@ func (item *Item) _getSize() (size int64, err error) {
 	return size, err
 }
 
-// GetName gets the vfs name of the item
+// GetName gets the name of the item
 func (item *Item) GetName() (name string) {
 	item.mu.Lock()
 	defer item.mu.Unlock()
@@ -1230,7 +1230,7 @@ func (item *Item) _ensure(offset, size int64) (err error) {
 // _written marks the (offset, size) as present in the backing file
 //
 // This is called by the downloader downloading file segments and the
-// vfs layer writing to the file.
+// proxy layer writing to the file.
 //
 // This doesn't mark the item as Dirty - that the responsibility
 // of the caller as we don't know here whether we are adding reads or

@@ -103,7 +103,7 @@ func TestFullFileCachedOnDisk(t *testing.T) {
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 2,
 		ShardLevel:        0,
 	}
@@ -196,7 +196,7 @@ func TestRangeCachedPartiallyOnDisk(t *testing.T) {
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 1,
 		ShardLevel:        0,
 	}
@@ -269,7 +269,7 @@ func TestCacheHashMatches(t *testing.T) {
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 4,
 		ShardLevel:        0,
 	}
@@ -344,7 +344,7 @@ func TestCacheReuseDataNoExtraGets(t *testing.T) {
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 1,
 		ShardLevel:        0,
 	}
@@ -405,7 +405,7 @@ func TestCacheDirStructure(t *testing.T) {
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 1,
 		ShardLevel:        0,
 	}

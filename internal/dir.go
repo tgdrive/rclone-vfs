@@ -38,7 +38,7 @@ func (d *Dir) Name() string {
 	return d.name
 }
 
-// Path returns the path relative to VFS root
+// Path returns the path relative to engine root
 func (d *Dir) Path() string {
 	return d.name
 }
@@ -149,16 +149,14 @@ func (d *Dir) Stat(filePath string) (node Node, err error) {
 	}
 
 	// If the file is in the cache, create a node for it
-	if d.engine.cache != nil {
-		cachePath := d.engine.cache.Item(filePath)
-		if cachePath != nil && cachePath.Exists() {
-			f := newFile(d.engine.Context(), d, filePath)
-			if size, err := cachePath.GetSize(); err == nil {
-				f.size.Store(size)
-			}
-			d.AddChild(filePath, f)
-			return f, nil
+	cacheItem := d.engine.cache.Item(filePath)
+	if cacheItem != nil && cacheItem.Exists() {
+		f := newFile(d.engine.Context(), d, filePath)
+		if size, err := cacheItem.GetSize(); err == nil {
+			f.size.Store(size)
 		}
+		d.AddChild(filePath, f)
+		return f, nil
 	}
 
 	return nil, os.ErrNotExist

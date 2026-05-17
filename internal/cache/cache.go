@@ -1,4 +1,4 @@
-// Package vfscache deals with caching of files locally for the VFS layer
+// Package cache deals with caching of files locally for the proxy layer
 package cache
 
 import (
@@ -26,13 +26,13 @@ import (
 // Cache may call into Item but care is needed if Item calls Cache
 
 // FIXME need to purge cache nodes which don't have backing files and aren't dirty
-// these may get created by the VFS layer or may be orphans from reload()
+// these may get created by the proxy layer or may be orphans from reload()
 
 // Cache opened files
 type Cache struct {
 	// read only - no locking needed to read these
 	ctx       context.Context       // context for cache lifetime
-	opt       *types.Options    // vfs Options
+	opt       *types.Options
 	root      string                // OS path for cache data
 	metaRoot  string                // OS path for cache metadata
 	writeback *writeback.WriteBack  // holds Items for writeback

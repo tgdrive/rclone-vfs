@@ -34,26 +34,24 @@ func newReadFileHandle(f *File) (*ReadFileHandle, error) {
 	}
 
 	// Try to open via cache first
-	if f.d.engine.cache != nil {
-		cachePath := f.Path()
-		item := f.d.engine.cache.Item(cachePath)
-		if item == nil {
-			return nil, fmt.Errorf("failed to get cache item for %s", cachePath)
-		}
+	cachePath := f.Path()
+	item := f.d.engine.cache.Item(cachePath)
+	if item == nil {
+		return nil, fmt.Errorf("failed to get cache item for %s", cachePath)
+	}
 
-		// Open the cache item with the remote object if available
-		if f.remote != nil {
-			err := item.Open(f.remote)
-			if err != nil {
-				return nil, fmt.Errorf("cache read: failed to open cache item: %w", err)
-			}
-			h.size = f.remote.Size()
+	// Open the cache item with the remote object if available
+	if f.remote != nil {
+		err := item.Open(f.remote)
+		if err != nil {
+			return nil, fmt.Errorf("cache read: failed to open cache item: %w", err)
 		}
+		h.size = f.remote.Size()
+	}
 
-		// Get size from cache item
-		if sz, err := item.GetSize(); err == nil {
-			h.size = sz
-		}
+	// Get size from cache item
+	if sz, err := item.GetSize(); err == nil {
+		h.size = sz
 	}
 
 	return h, nil
@@ -101,11 +99,9 @@ func (fh *ReadFileHandle) ReadAt(p []byte, off int64) (n int, err error) {
 
 // readAt reads from the cache item at the given offset
 func (fh *ReadFileHandle) readAt(p []byte, off int64) (n int, err error) {
-	if fh.f.d.engine.cache != nil {
-		item := fh.f.d.engine.cache.Item(fh.f.Path())
-		if item != nil {
-			return item.ReadAt(p, off)
-		}
+	item := fh.f.d.engine.cache.Item(fh.f.Path())
+	if item != nil {
+		return item.ReadAt(p, off)
 	}
 	return 0, io.EOF
 }

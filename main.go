@@ -21,7 +21,6 @@ import (
 var (
 	port = pflag.String("port", "8080", "Port to listen on")
 	cacheDir = pflag.String("cache-dir", filepath.Join(os.TempDir(), "varc_cache"), "Cache directory")
-	cacheMode = pflag.String("cache-mode", "minimal", "Cache mode (off, minimal, writes, full)")
 	chunkSize = pflag.String("chunk-size", "", "Chunk size for reading (e.g., 4M)")
 	chunkStreams = pflag.Int("chunk-streams", 2, "Number of parallel chunk streams")
 	stripQuery = pflag.Bool("strip-query", false, "Strip query parameters from URL for caching")
@@ -40,7 +39,6 @@ func main() {
 
 	opt := proxy.Options{
 		CacheDir:          *cacheDir,
-		CacheMode:         *cacheMode,
 		CacheChunkSize:    *chunkSize,
 		CacheChunkStreams: *chunkStreams,
 		StripQuery:        *stripQuery,
@@ -99,7 +97,7 @@ func main() {
 	go func() {
 		zapLogger.Info("Engine listening",
 			zap.String("addr", ":"+*port),
-			zap.String("cache_mode", handler.Engine.Opt.CacheMode.String()),
+
 			zap.String("cache_dir", handler.Engine.Opt.CacheDir),
 		)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

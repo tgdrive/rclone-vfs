@@ -33,7 +33,7 @@ type WriteBack struct {
 	mu      sync.Mutex
 	items   writeBackItems            // priority queue of *writeBackItem - writeBackItems are in here while awaiting transfer only
 	lookup  map[Handle]*writeBackItem // for getting a *writeBackItem from a Handle - writeBackItems are in here until cancelled
-	opt     *types.Options        // VFS options
+	opt     *types.Options        // engine options
 	timer   *time.Timer               // next scheduled time for the uploader
 	expiry  time.Time                 // time the next item expires or IsZero
 	uploads int                       // number of uploads in progress

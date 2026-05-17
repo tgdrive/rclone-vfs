@@ -75,14 +75,14 @@ func testUpstream(t *testing.T, data []byte) *httptest.Server {
 }
 
 func TestProxyFullFileServe(t *testing.T) {
-	data := []byte("hello world this is a test file for the VFS proxy")
+	data := []byte("hello world this is a test file for the cache proxy")
 	upstream := testUpstream(t, data)
 	defer upstream.Close()
 
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 1,
 		ShardLevel:        0,
 	}
@@ -117,7 +117,7 @@ func TestProxyRangeRequest(t *testing.T) {
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 1,
 		ShardLevel:        0,
 	}
@@ -174,7 +174,7 @@ func TestProxyMultipleRanges(t *testing.T) {
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 2,
 		ShardLevel:        0,
 	}
@@ -218,7 +218,7 @@ func TestProxyCacheReuse(t *testing.T) {
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 4,
 		ShardLevel:        0,
 	}
@@ -254,7 +254,7 @@ func TestProxyCacheReuse(t *testing.T) {
 func TestProxyFileNotFound(t *testing.T) {
 	opt := Options{
 		CacheDir:          t.TempDir(),
-		CacheMode:         "minimal",
+
 		CacheChunkStreams: 1,
 		ShardLevel:        0,
 	}
@@ -312,7 +312,7 @@ func TestCacheCleanup(t *testing.T) {
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 1,
 		ShardLevel:        0,
 	}
@@ -345,7 +345,6 @@ func TestOptionsDefaults(t *testing.T) {
 
 	assert.Equal(t, 1, opt.ShardLevel)
 	assert.Equal(t, 2, opt.CacheChunkStreams)
-	assert.Equal(t, "minimal", opt.CacheMode)
 }
 
 func TestParseSize(t *testing.T) {
@@ -375,7 +374,7 @@ func TestOptionsNewHandler(t *testing.T) {
 		CacheDir:          cacheDir,
 		CacheChunkSize:    "4M",
 		CacheChunkStreams: 4,
-		CacheMode:         "full",
+
 	}
 
 	handler, err := NewHandler(opt)
@@ -384,6 +383,250 @@ func TestOptionsNewHandler(t *testing.T) {
 
 	assert.NotNil(t, handler.Engine)
 	assert.NotNil(t, handler.client)
+}
+
+func TestPurgeEndpoint(t *testing.T) {
+	data := []byte("purge test data")
+	upstream := testUpstream(t, data)
+	defer upstream.Close()
+
+	cacheDir := t.TempDir()
+	opt := Options{
+		CacheDir:          cacheDir,
+		CacheChunkStreams: 1,
+		ShardLevel:        0,
+	}
+
+	handler, err := NewHandler(opt)
+	require.NoError(t, err)
+	defer handler.Shutdown()
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.Serve(w, r, upstream.URL)
+	}))
+	defer proxy.Close()
+
+	// First cache the file
+	resp, err := http.Get(proxy.URL)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, data, body)
+
+	// Verify it's cached
+	cachePath := handler.hashCachePath(upstream.URL)
+	item := handler.Engine.CacheItem(cachePath)
+	require.NotNil(t, item)
+	require.True(t, item.Exists())
+
+	// Purge it via PURGE method
+	purgeReq, err := http.NewRequest("PURGE", proxy.URL, nil)
+	require.NoError(t, err)
+	purgeResp, err := http.DefaultClient.Do(purgeReq)
+	require.NoError(t, err)
+	purgeBody, err := io.ReadAll(purgeResp.Body)
+	purgeResp.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, purgeResp.StatusCode)
+	assert.Equal(t, "Purged", string(purgeBody))
+
+	// Verify it's gone from cache
+	item2 := handler.Engine.CacheItem(cachePath)
+	require.NotNil(t, item2)
+	require.False(t, item2.Exists())
+}
+
+func TestPassthroughNonGet(t *testing.T) {
+	data := []byte("passthrough test")
+	upstream := testUpstream(t, data)
+	defer upstream.Close()
+
+	cacheDir := t.TempDir()
+	opt := Options{
+		CacheDir:          cacheDir,
+		CacheChunkStreams: 1,
+		ShardLevel:        0,
+	}
+
+	handler, err := NewHandler(opt)
+	require.NoError(t, err)
+	defer handler.Shutdown()
+
+	// POST request should bypass cache
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/", strings.NewReader("body"))
+	handler.Serve(w, req, upstream.URL)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, data, w.Body.Bytes())
+
+	// Also test that a PUT request bypasses cache
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("PUT", "/", strings.NewReader("body"))
+	handler.Serve(w2, req2, upstream.URL)
+	assert.Equal(t, http.StatusOK, w2.Code)
+	assert.Equal(t, data, w2.Body.Bytes())
+}
+
+func TestPassthroughHeader(t *testing.T) {
+	data := []byte("passthrough header test")
+	upstream := testUpstream(t, data)
+	defer upstream.Close()
+
+	cacheDir := t.TempDir()
+	opt := Options{
+		CacheDir:          cacheDir,
+		CacheChunkStreams: 1,
+		ShardLevel:        0,
+	}
+
+	handler, err := NewHandler(opt)
+	require.NoError(t, err)
+	defer handler.Shutdown()
+
+	// Request with Authorization header should bypass cache
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	handler.Serve(w, req, upstream.URL)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, data, w.Body.Bytes())
+}
+
+func TestPassthroughOption(t *testing.T) {
+	data := []byte("passthrough option test")
+	upstream := testUpstream(t, data)
+	defer upstream.Close()
+
+	cacheDir := t.TempDir()
+	opt := Options{
+		CacheDir:          cacheDir,
+		CacheChunkStreams: 1,
+		ShardLevel:        0,
+		Passthrough:       true,
+	}
+
+	handler, err := NewHandler(opt)
+	require.NoError(t, err)
+	defer handler.Shutdown()
+
+	// Even GET should bypass cache when Passthrough option is set
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	handler.Serve(w, req, upstream.URL)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, data, w.Body.Bytes())
+}
+
+func TestMetrics(t *testing.T) {
+	data := []byte("metrics test data")
+	upstream := testUpstream(t, data)
+	defer upstream.Close()
+
+	cacheDir := t.TempDir()
+	opt := Options{
+		CacheDir:          cacheDir,
+		CacheChunkStreams: 1,
+		ShardLevel:        0,
+	}
+
+	handler, err := NewHandler(opt)
+	require.NoError(t, err)
+	defer handler.Shutdown()
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.Serve(w, r, upstream.URL)
+	}))
+	defer proxy.Close()
+
+	// Make a request
+	resp, err := http.Get(proxy.URL)
+	require.NoError(t, err)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// Verify metrics
+	snap := handler.Metrics().Snapshot()
+	assert.Equal(t, int64(1), snap["requests"])
+	assert.Equal(t, int64(len(data)), snap["bytes_served"])
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	data := []byte("metrics endpoint test")
+	upstream := testUpstream(t, data)
+	defer upstream.Close()
+
+	cacheDir := t.TempDir()
+	opt := Options{
+		CacheDir:          cacheDir,
+		CacheChunkStreams: 1,
+		ShardLevel:        0,
+	}
+
+	handler, err := NewHandler(opt)
+	require.NoError(t, err)
+	defer handler.Shutdown()
+
+	// Serve a file first
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	handler.Serve(w, req, upstream.URL)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// ServeMetrics should return JSON
+	mw := httptest.NewRecorder()
+	handler.ServeMetrics(mw)
+	assert.Equal(t, "application/json", mw.Header().Get("Content-Type"))
+	assert.Contains(t, mw.Body.String(), `"requests":1`)
+}
+
+func TestConditionalRequest(t *testing.T) {
+	data := []byte("conditional request test")
+	upstream := testUpstream(t, data)
+	defer upstream.Close()
+
+	cacheDir := t.TempDir()
+	opt := Options{
+		CacheDir:          cacheDir,
+		CacheChunkStreams: 1,
+		ShardLevel:        0,
+	}
+
+	handler, err := NewHandler(opt)
+	require.NoError(t, err)
+	defer handler.Shutdown()
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.Serve(w, r, upstream.URL)
+	}))
+	defer proxy.Close()
+
+	// First request to cache the file
+	resp, err := http.Get(proxy.URL)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	// Get Last-Modified from the first response
+	lastMod := resp.Header.Get("Last-Modified")
+	require.NotEmpty(t, lastMod)
+	etag := resp.Header.Get("ETag")
+	require.NotEmpty(t, etag)
+
+	// Request with If-Modified-Since (future date) → should get 304
+	req, _ := http.NewRequest("GET", proxy.URL, nil)
+	req.Header.Set("If-Modified-Since", time.Now().UTC().Add(time.Hour).Format(http.TimeFormat))
+	resp2, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp2.Body.Close()
+	assert.Equal(t, http.StatusNotModified, resp2.StatusCode)
+
+	// Request with If-None-Match (matching ETag) → should get 304
+	req3, _ := http.NewRequest("GET", proxy.URL, nil)
+	req3.Header.Set("If-None-Match", etag)
+	resp3, err := http.DefaultClient.Do(req3)
+	require.NoError(t, err)
+	resp3.Body.Close()
+	assert.Equal(t, http.StatusNotModified, resp3.StatusCode)
 }
 
 func TestConcurrentRangeRequests(t *testing.T) {
@@ -397,7 +640,7 @@ func TestConcurrentRangeRequests(t *testing.T) {
 	cacheDir := t.TempDir()
 	opt := Options{
 		CacheDir:          cacheDir,
-		CacheMode:         "full",
+
 		CacheChunkStreams: 4,
 		ShardLevel:        0,
 	}

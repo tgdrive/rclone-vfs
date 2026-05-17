@@ -14,7 +14,7 @@ import (
 var _ types.RemoteObject = (*remoteFile)(nil)
 
 // remoteFile is an HTTP-backed RemoteObject used by the proxy
-// to fetch files from upstream URLs through the VFS cache.
+// to fetch files from upstream URLs through the disk cache.
 type remoteFile struct {
 	url     string
 	headers http.Header

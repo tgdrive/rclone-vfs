@@ -1,4 +1,4 @@
-// Package downloaders provides utilities for the VFS layer
+// Package downloaders provides utilities for the cache layer
 package downloaders
 
 import (
@@ -521,7 +521,7 @@ func (dl *downloader) open(offset int64) (err error) {
 		return errors.New("can't open unknown sized file")
 	}
 
-	// FIXME hashType needs to ignore when --no-checksum is set too? Which is a VFS flag.
+	// FIXME hashType needs to ignore when --no-checksum is set too? Which is an engine flag.
 	// var rangeOption *fs.RangeOption
 	// if offset > 0 {
 	// 	rangeOption = &fs.RangeOption{Start: offset, End: size - 1}
