@@ -1,5 +1,11 @@
-// Package pool provides a concurrent read-write buffer used by the parallel chunked reader.
-package pool
+// Package rwbuffer provides a concurrent read-write buffer for parallel streaming.
+//
+// One goroutine writes into the buffer via ReadFrom while another reads
+// from it via Read. WaitWrite synchronizes the reader with the writer.
+// This is used by the parallel chunked reader to download file chunks
+// concurrently: one goroutine reads from the HTTP response into the buffer,
+// while the chunked reader reads from the buffer into the cache file.
+package rwbuffer
 
 import (
 	"context"
@@ -7,25 +13,34 @@ import (
 	"sync"
 )
 
+// BufferSize is the default capacity (1 MiB).
+const BufferSize = 1024 * 1024
+
+// New returns a new RW buffer with BufferSize initial capacity.
+func New() *RW {
+	return NewSized(BufferSize)
+}
+
+// NewSized returns a new RW buffer with the given initial capacity.
+func NewSized(capacity int) *RW {
+	rw := &RW{
+		buf: make([]byte, 0, capacity),
+	}
+	rw.cond = sync.NewCond(&rw.mu)
+	return rw
+}
+
 // RW is a concurrent read-write buffer.
 //
-// One goroutine writes into the buffer via ReadFrom while another reads
-// from it via Read. WaitWrite synchronizes the reader with the writer.
+// A writer goroutine calls ReadFrom to fill the buffer; a reader
+// goroutine calls Read to consume it. WaitWrite allows the reader
+// to block until more data arrives.
 type RW struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
 	buf     []byte
 	rOffset int   // current read position in buf
 	closed  bool
-}
-
-// NewRW creates a new RW with the given initial capacity.
-func NewRW(capacity int) *RW {
-	rw := &RW{
-		buf: make([]byte, 0, capacity),
-	}
-	rw.cond = sync.NewCond(&rw.mu)
-	return rw
 }
 
 // ReadFrom reads data from r into the buffer. It is intended to be called

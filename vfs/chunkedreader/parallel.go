@@ -6,8 +6,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/tgdrive/rclone-vfs/vfs/multipart"
-	"github.com/tgdrive/rclone-vfs/vfs/pool"
+	"github.com/tgdrive/rclone-vfs/lib/rwbuffer"
 	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
 )
 
@@ -33,7 +32,7 @@ type stream struct {
 	offset    int64           // where the stream is reading from
 	size      int64           // and the size it is reading
 	readBytes int64           // bytes read from the stream
-	rw        *pool.RW        // buffer for read
+	rw        *rwbuffer.RW    // buffer for read
 	err       chan error      // error returned from the read
 	name      string          // name of this stream for debugging
 }
@@ -43,7 +42,7 @@ func (cr *parallel) newStream(ctx context.Context, offset, size int64) (s *strea
 	ctx, cancel := context.WithCancel(ctx)
 
 	// Create the stream
-	rw := multipart.NewRW()
+	rw := rwbuffer.New()
 	s = &stream{
 		cr:     cr,
 		ctx:    ctx,
@@ -135,13 +134,13 @@ func (s *stream) close() (err error) {
 //
 // Mustn't be called for an unknown size object
 func newParallel(ctx context.Context, o vfscommon.RemoteObject, chunkSize int64, streams int) ChunkedReader {
-	// Make sure chunkSize is a multiple of multipart.BufferSize
+	// Make sure chunkSize is a multiple of rwbuffer.BufferSize
 	if chunkSize < 0 {
-		chunkSize = multipart.BufferSize
+		chunkSize = rwbuffer.BufferSize
 	}
-	newChunkSize := multipart.BufferSize * (chunkSize / multipart.BufferSize)
+	newChunkSize := rwbuffer.BufferSize * (chunkSize / rwbuffer.BufferSize)
 	if newChunkSize < chunkSize {
-		newChunkSize += multipart.BufferSize
+		newChunkSize += rwbuffer.BufferSize
 	}
 
 	return &parallel{
