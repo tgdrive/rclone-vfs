@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
-	"github.com/tgdrive/rclone-vfs/pkg/vfsproxy"
+	"github.com/tgdrive/varc/pkg/vfsproxy"
 )
 
 func TestUnmarshalCaddyfile(t *testing.T) {

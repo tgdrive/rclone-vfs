@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
+	"github.com/tgdrive/varc/vfs/vfscommon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

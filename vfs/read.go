@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tgdrive/rclone-vfs/vfs/chunkedreader"
+	"github.com/tgdrive/varc/vfs/chunkedreader"
 )
 
 // ReadFileHandle represents a file handle for reading

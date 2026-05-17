@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tgdrive/rclone-vfs/vfs"
-	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
+	"github.com/tgdrive/varc/vfs"
+	"github.com/tgdrive/varc/vfs/vfscommon"
 )
 
 // Options holds configuration for the VFS proxy handler
@@ -87,7 +87,7 @@ func NewHandler(opt Options) (*Handler, error) {
 
 	cacheDir := opt.CacheDir
 	if cacheDir == "" {
-		cacheDir = filepath.Join(os.TempDir(), "rclone_vfs_cache")
+		cacheDir = filepath.Join(os.TempDir(), "varc_cache")
 	}
 
 	// Build VFS options

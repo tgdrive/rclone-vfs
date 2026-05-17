@@ -1,4 +1,4 @@
-module github.com/tgdrive/rclone-vfs
+module github.com/tgdrive/varc
 
 go 1.25.6
 

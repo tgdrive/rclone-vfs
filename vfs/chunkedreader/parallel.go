@@ -6,8 +6,8 @@ import (
 	"io"
 	"sync"
 
-	"github.com/tgdrive/rclone-vfs/lib/rwbuffer"
-	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
+	"github.com/tgdrive/varc/lib/rwbuffer"
+	"github.com/tgdrive/varc/vfs/vfscommon"
 )
 
 // parallel reads Object in chunks of a given size in parallel.

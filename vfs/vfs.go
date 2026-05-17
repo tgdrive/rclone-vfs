@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tgdrive/rclone-vfs/vfs/vfscache"
-	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
+	"github.com/tgdrive/varc/vfs/vfscache"
+	"github.com/tgdrive/varc/vfs/vfscommon"
 )
 
 // Node represents either a directory (*Dir) or a file (*File)

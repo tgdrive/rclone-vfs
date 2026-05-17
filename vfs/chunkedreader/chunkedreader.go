@@ -9,7 +9,7 @@ import (
 	"errors"
 	"io"
 
-	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
+	"github.com/tgdrive/varc/vfs/vfscommon"
 )
 
 // io related errors returned by ChunkedReader

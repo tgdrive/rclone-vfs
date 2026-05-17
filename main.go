@@ -13,14 +13,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tgdrive/rclone-vfs/pkg/vfsproxy"
+	"github.com/tgdrive/varc/pkg/vfsproxy"
 
 	"github.com/spf13/pflag"
 )
 
 var (
 	port = pflag.String("port", "8080", "Port to listen on")
-	cacheDir = pflag.String("cache-dir", filepath.Join(os.TempDir(), "rclone_vfs_cache"), "Cache directory")
+	cacheDir = pflag.String("cache-dir", filepath.Join(os.TempDir(), "varc_cache"), "Cache directory")
 	cacheMode = pflag.String("cache-mode", "minimal", "VFS cache mode (off, minimal, writes, full)")
 	chunkSize = pflag.String("chunk-size", "", "Chunk size for reading (e.g., 4M)")
 	chunkStreams = pflag.Int("chunk-streams", 2, "Number of parallel chunk streams")

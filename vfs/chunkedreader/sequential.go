@@ -5,7 +5,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
+	"github.com/tgdrive/varc/vfs/vfscommon"
 )
 
 // sequential is a reader for an Object with the possibility

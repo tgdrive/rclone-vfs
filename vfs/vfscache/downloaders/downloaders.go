@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tgdrive/rclone-vfs/lib/ranges"
-	"github.com/tgdrive/rclone-vfs/vfs/chunkedreader"
-	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
+	"github.com/tgdrive/varc/lib/ranges"
+	"github.com/tgdrive/varc/vfs/chunkedreader"
+	"github.com/tgdrive/varc/vfs/vfscommon"
 )
 
 // FIXME implement max downloaders

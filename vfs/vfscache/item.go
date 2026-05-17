@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/tgdrive/rclone-vfs/lib/file"
-	"github.com/tgdrive/rclone-vfs/lib/ranges"
-	"github.com/tgdrive/rclone-vfs/vfs/vfscache/downloaders"
-	"github.com/tgdrive/rclone-vfs/vfs/vfscache/writeback"
-	"github.com/tgdrive/rclone-vfs/vfs/vfscommon"
+	"github.com/tgdrive/varc/lib/file"
+	"github.com/tgdrive/varc/lib/ranges"
+	"github.com/tgdrive/varc/vfs/vfscache/downloaders"
+	"github.com/tgdrive/varc/vfs/vfscache/writeback"
+	"github.com/tgdrive/varc/vfs/vfscommon"
 )
 
 // NB as Cache and Item are tightly linked it is necessary to have a

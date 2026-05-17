@@ -1,13 +1,15 @@
-# rclone-vfs
+# varc — Range-Caching HTTP Proxy
 
-A high-performance streaming proxy server built on top of [Rclone's VFS](https://rclone.org/commands/rclone_mount/#vfs-file-caching) layer. This service allows you to stream files from any HTTP/HTTPS URL with the benefits of Rclone's smart caching, buffering, and read-ahead capabilities.
+A high-performance HTTP reverse proxy with native Range request caching. Built from the ground up for streaming media, it downloads content from upstream in parallel chunks and caches everything on disk — including byte ranges.
 
 ## Features
 
-- **Rclone VFS Integration**: Leverages Rclone's robust VFS for disk caching, sparse file support, and efficient streaming.
-- **Flexible Input**: Supports passing target URLs via query parameters or Base64-encoded paths.
-- **Deduplication**: Optional query parameter and domain stripping to maximize cache hits for mirrored content.
-- **Caddy Ready**: Includes a native Caddy module for easy integration into your web server.
+- **Native Range Caching**: Unlike Varnish (which passthroughs Range requests), varc caches byte ranges on disk and serves them from cache. Concurrent range requests are coalesced into a single upstream fetch.
+- **Parallel Chunked Downloading**: Downloads files in parallel streams for maximum throughput on high-latency connections.
+- **Disk-Backed Cache**: Sparse file support, metadata persistence, configurable max age/size.
+- **Multiple Access Modes**: Standalone HTTP server, Caddy module, or Go library.
+- **Flexible Cache Keys**: Optional query parameter stripping, domain stripping, hash sharding.
+- **Caddy Ready**: Native Caddy module for easy integration.
 - **Docker Ready**: Minimal Alpine-based Docker image.
 
 ## Getting Started
@@ -18,75 +20,83 @@ A high-performance streaming proxy server built on top of [Rclone's VFS](https:/
 
 ### Installation & Run
 
-You can run `rclone-vfs` directly using Docker:
+You can run `varc` directly using Docker:
 
 ```bash
 docker run -d \
   -p 8080:8080 \
-  -v /path/to/host/cache:/tmp/rclone_vfs_cache \
-  ghcr.io/tgdrive/rclone-vfs --cache-dir /tmp/rclone_vfs_cache
+  -v /path/to/host/cache:/tmp/varc_cache \
+  ghcr.io/tgdrive/varc --cache-dir /tmp/varc_cache
+```
+
+### Usage
+
+```
+# Stream a file via query parameter
+curl "http://localhost:8080/stream?url=https://example.com/video.mp4"
+
+# Or Base64-encoded path
+curl "http://localhost:8080/stream/aHR0cHM6Ly9leGFtcGxlLmNvbS92aWRlby5tcDQ"
+
+# Range requests are cached natively
+curl -H "Range: bytes=0-999999" "http://localhost:8080/stream?url=https://example.com/video.mp4"
 ```
 
 ## CLI Flags
 
-All Rclone VFS settings are supported. Below are the most common ones:
-
 | Flag | Default | Description |
-|------|---------|-------------|
-| `--port` | `8080` | Port to listen on. |
-| `--cache-dir` | System Temp | Directory to store the VFS disk cache. |
-| `--cache-mode` | `off` | VFS cache mode (`off`, `minimal`, `writes`, `full`). |
-| `--chunk-size` | `64M` | The chunk size for read requests. |
-| `--chunk-streams` | `2` | Number of parallel streams to read at once. |
-| `--max-age` | `1h` | Max age of files in the VFS cache. |
-| `--max-size` | `off` | Max total size of objects in the cache. |
-| `--strip-query` | `false` | If true, strips query parameters from the URL when generating the cache key. |
-| `--strip-domain` | `false` | If true, strips domain and protocol from the URL. |
-| `--shard-level` | `1` | Number of directory levels for sharding the cache. |
+|---|---|---|
+| `--port` | `8080` | Port to listen on |
+| `--cache-dir` | `$TMPDIR/varc_cache` | Cache directory |
+| `--cache-mode` | `minimal` | Cache mode: `off`, `minimal`, `writes`, `full` |
+| `--chunk-size` | `128M` | Chunk size for parallel downloads |
+| `--chunk-streams` | `2` | Number of parallel download streams |
+| `--max-age` | `1h` | Maximum cache age |
+| `--max-size` | - | Maximum cache size (e.g., `10G`) |
+| `--strip-query` | `false` | Strip query params from cache key |
+| `--strip-domain` | `false` | Strip domain from cache key |
+| `--shard-level` | `1` | Hash shard depth for cache paths |
 
-*Run `rclone-vfs --help` to see all available flags, including advanced VFS permissions and timing settings.*
+## Caddy Module
 
-## API Endpoints
-
-### 1. Stream via Query Parameter
-```http
-GET /stream?url=https://example.com/video.mp4
-```
-
-### 2. Stream via Base64 Path
-Useful for players that struggle with query parameters.
-1. Base64 encode your URL: `https://example.com/video.mp4` -> `aHR0cHM6Ly9leGFtcGxlLmNvbS92aWRlby5tcDQ`
-2. Request: `GET /stream/aHR0cHM6Ly9leGFtcGxlLmNvbS92aWRlby5tcDQ`
-
-## Caddy Plugin
-
-Build Caddy with the module:
-```bash
-xcaddy build --with github.com/tgdrive/rclone-vfs/caddy
-```
-
-### Caddyfile Usage
 ```caddyfile
-:8080 {
-    vfs https://upstream.com {
-        cache_dir /var/cache/vfs
+example.com {
+    vfs https://upstream.example.com {
         cache_mode full
+        cache_dir /data/cache
+        chunk_streams 4
         max_age 24h
+        max_size 50G
         strip_query
     }
+
+    reverse_proxy localhost:8080
 }
 ```
 
-### Caddyfile Directives
-- `upstream` (argument): The base URL of the source server.
-- `cache_dir`: Path to disk cache.
-- `cache_mode`: `off`, `minimal`, `writes`, or `full`.
-- `max_age`, `max_size`, `chunk_size`, `chunk_streams`.
-- `strip_query`, `strip_domain`, `shard-level`.
-- `read_only`, `no_seek`, `no_checksum`, etc.
+## Architecture
 
-## How it Works
+1. **Request arrives** → proxy resolves the upstream URL via query param or base64 path.
+2. **Cache check** → if the file is already cached on disk, serve directly from cache.
+3. **Cache miss** → file is downloaded from upstream in parallel chunks using Range requests, written to disk cache, and streamed to the client.
+4. **Range requests** → if the requested range is partially cached, only the missing bytes are fetched from upstream. Fully cached ranges are served without touching the upstream.
+5. **Cache cleanup** → background cleaner evicts expired or oversized entries.
 
-1. **VFS Mapping**: The requested URL is mapped to a unique deterministic path in a virtual rclone file system.
-2. **Streaming**: Rclone's VFS layer handles the heavy lifting—on-demand downloading, parallel chunk streaming, and local disk persistence.
-3. **Efficiency**: Range requests are fully supported, allowing clients to seek through large files without downloading the entire file.
+## Performance
+
+- Parallel chunked download with configurable stream count
+- Sparse file support — no wasted disk for uncached ranges
+- Concurrent readers don't block each other
+- Metadata is persisted as JSON alongside cached data
+
+## Development
+
+```bash
+# Build
+go build -o varc .
+
+# Run tests
+go test ./...
+
+# Cross-compile
+GOOS=linux GOARCH=amd64 go build -o varc-linux-amd64 .

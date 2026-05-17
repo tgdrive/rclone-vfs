@@ -15,7 +15,7 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 
-	"github.com/tgdrive/rclone-vfs/pkg/vfsproxy"
+	"github.com/tgdrive/varc/pkg/vfsproxy"
 )
 
 func init() {
