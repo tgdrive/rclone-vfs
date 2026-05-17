@@ -1,6 +1,9 @@
 # Binaries
-vfs
-vfs-proxy
+/vfs
+/vfs-proxy
+
+# But track the vfs/ source directory
+!/vfs/
 *.exe
 *.exe~
 *.dll
