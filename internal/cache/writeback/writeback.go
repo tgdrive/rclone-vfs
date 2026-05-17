@@ -6,8 +6,6 @@ import (
 	"container/heap"
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -286,7 +284,7 @@ func (wb *WriteBack) Add(id Handle, name string, size int64, modified bool, putF
 func (wb *WriteBack) _remove(id Handle) (found bool) {
 	wbItem, found := wb.lookup[id]
 	if found {
-		fmt.Fprintf(os.Stderr, "cache: cancelling writeback (uploading %v) %p item %d\n", wbItem.uploading, wbItem, wbItem.id)
+		wb.opt.Logger.Infof("cache: cancelling writeback (uploading %v) %p item %d", wbItem.uploading, wbItem, wbItem.id)
 		if wbItem.uploading {
 			// We are uploading already so cancel the upload
 			wb._cancelUpload(wbItem)
@@ -350,7 +348,7 @@ func (wb *WriteBack) upload(ctx context.Context, wbItem *writeBackItem) {
 	putFn := wbItem.putFn
 	wbItem.tries++
 
-	fmt.Fprintf(os.Stderr, "cache: starting upload\n")
+	wb.opt.Logger.Infof("cache: starting upload")
 
 	wb.mu.Unlock()
 	err := putFn(ctx)
@@ -368,17 +366,17 @@ func (wb *WriteBack) upload(ctx context.Context, wbItem *writeBackItem) {
 			wbItem.delay = maxUploadDelay
 		}
 		if errors.Is(err, context.Canceled) {
-			fmt.Fprintf(os.Stderr, "cache: upload canceled\n")
+			wb.opt.Logger.Infof("cache: upload canceled")
 			// Upload was cancelled so reset timer
 			wbItem.delay = time.Duration(wb.opt.WriteBack)
 		} else {
-			fmt.Fprintf(os.Stderr, "cache: failed to upload try #%d, will retry in %v: %v\n", wbItem.tries, wbItem.delay, err)
+			wb.opt.Logger.Infof("cache: failed to upload try #%d, will retry in %v: %v", wbItem.tries, wbItem.delay, err)
 		}
 		// push the item back on the queue for retry
 		wb._pushItem(wbItem)
 		wb.items._update(wbItem, time.Now().Add(wbItem.delay))
 	} else {
-		fmt.Fprintf(os.Stderr, "cache: upload succeeded try #%d\n", wbItem.tries)
+		wb.opt.Logger.Infof("cache: upload succeeded try #%d", wbItem.tries)
 		// show that we are done with the item
 		wb._delItem(wbItem)
 	}
@@ -393,7 +391,7 @@ func (wb *WriteBack) _cancelUpload(wbItem *writeBackItem) {
 	if !wbItem.uploading {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "cache: cancelling upload\n")
+	wb.opt.Logger.Infof("cache: cancelling upload")
 	if wbItem.cancel != nil {
 		// Cancel the upload - this may or may not be effective
 		wbItem.cancel()
@@ -407,7 +405,7 @@ func (wb *WriteBack) _cancelUpload(wbItem *writeBackItem) {
 	}
 	// uploading items are not on the heap so add them back
 	wb._pushItem(wbItem)
-	fmt.Fprintf(os.Stderr, "cache: cancelled upload\n")
+	wb.opt.Logger.Infof("cache: cancelled upload")
 }
 
 // cancelUpload cancels the upload of the item if there is one in progress
@@ -437,7 +435,7 @@ func (wb *WriteBack) processItems(ctx context.Context) {
 	for wbItem := wb._peekItem(); wbItem != nil && time.Until(wbItem.expiry) <= 0; wbItem = wb._peekItem() {
 		// If reached transfer limit don't restart the timer
 		if wb.uploads >= 4 {
-			fmt.Fprintf(os.Stderr, "cache: delaying writeback as max transfers exceeded\n")
+			wb.opt.Logger.Infof("cache: delaying writeback as max transfers exceeded")
 			resetTimer = false
 			break
 		}

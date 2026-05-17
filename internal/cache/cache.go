@@ -341,7 +341,7 @@ func (c *Cache) Rename(name string, newName string, newObj types.RemoteObject) (
 	}
 	c.mu.Unlock()
 
-	fmt.Fprintf(os.Stderr, "[INFO] vfs cache: renamed in cache %q to %q\n", name, newName)
+	c.opt.Logger.Infof("cache: renamed in cache %q to %q", name, newName)
 	return nil
 }
 
@@ -384,7 +384,7 @@ func (c *Cache) DirRename(oldDirName string, newDirName string) (err error) {
 	// Old path should be empty now so remove it
 	c.purgeEmptyDirs(oldDirName[:len(oldDirName)-1], false)
 
-	fmt.Fprintf(os.Stderr, "[INFO] vfs cache: renamed dir in cache %q to %q\n", oldDirName, newDirName)
+	c.opt.Logger.Infof("cache: renamed dir in cache %q to %q", oldDirName, newDirName)
 	return err
 }
 
@@ -458,7 +458,7 @@ func (c *Cache) reload(ctx context.Context) error {
 			if !found {
 				err := item.reload(ctx)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "[ERROR] vfs cache: failed to reload item %q: %v\n", name, err)
+					c.opt.Logger.Errorf("cache: failed to reload item %q: %v", name, err)
 				}
 			}
 			return nil
@@ -475,14 +475,14 @@ func (c *Cache) KickCleaner() {
 	/* Use a separate kicker mutex for the kick to go through without waiting for the
 	   cache mutex to avoid letting a thread kick again after the clearer just
 	   finished cleaning and unlock the cache mutex. */
-	fmt.Fprintf(os.Stderr, "[DEBUG] vfs cache: at the beginning of KickCleaner\n")
+	c.opt.Logger.Debugf("cache: at the beginning of KickCleaner")
 	c.kickerMu.Lock()
 	if !c.cleanerKicked {
 		c.cleanerKicked = true
-		fmt.Fprintf(os.Stderr, "[DEBUG] vfs cache: in KickCleaner, ready to lock cache mutex\n")
+		c.opt.Logger.Debugf("cache: in KickCleaner, ready to lock cache mutex")
 		c.mu.Lock()
 		c.outOfSpace = true
-		fmt.Fprintf(os.Stderr, "[INFO] vfs cache: in KickCleaner, ready to kick cleaner\n")
+		c.opt.Logger.Infof("cache: in KickCleaner, ready to kick cleaner")
 		c.kick <- struct{}{}
 		c.mu.Unlock()
 	}
@@ -490,10 +490,10 @@ func (c *Cache) KickCleaner() {
 
 	c.mu.Lock()
 	for c.outOfSpace {
-		fmt.Fprintf(os.Stderr, "[DEBUG] vfs cache: in KickCleaner, looping on c.outOfSpace\n")
+		c.opt.Logger.Debugf("cache: in KickCleaner, looping on c.outOfSpace")
 		c.cond.Wait()
 	}
-	fmt.Fprintf(os.Stderr, "[DEBUG] vfs cache: in KickCleaner, leaving c.outOfSpace loop\n")
+	c.opt.Logger.Debugf("cache: in KickCleaner, leaving c.outOfSpace loop")
 	c.mu.Unlock()
 }
 
@@ -505,11 +505,11 @@ func (c *Cache) removeNotInUse(item *Item, maxAge time.Duration, emptyOnly bool)
 	// The item will not be removed or reset the cache data is dirty (DataDirty)
 	c.used -= spaceFreed
 	if removed {
-		fmt.Fprintf(os.Stderr, "[INFO] vfs cache RemoveNotInUse (maxAge=%d, emptyOnly=%v): item %s was removed, freed %d bytes\n", maxAge, emptyOnly, item.GetName(), spaceFreed)
+		c.opt.Logger.Infof("cache RemoveNotInUse (maxAge=%d, emptyOnly=%v): item %s was removed, freed %d bytes", maxAge, emptyOnly, item.GetName(), spaceFreed)
 		// Remove the entry
 		delete(c.item, item.name)
 	} else {
-		fmt.Fprintf(os.Stderr, "[DEBUG] vfs cache RemoveNotInUse (maxAge=%d, emptyOnly=%v): item %s not removed, freed %d bytes\n", maxAge, emptyOnly, item.GetName(), spaceFreed)
+		c.opt.Logger.Debugf("cache RemoveNotInUse (maxAge=%d, emptyOnly=%v): item %s not removed, freed %d bytes", maxAge, emptyOnly, item.GetName(), spaceFreed)
 	}
 }
 
@@ -519,7 +519,7 @@ func (c *Cache) retryFailedResets() {
 	// for saving the cache item's metadata.  Redo the Reset()'s here now that
 	// we may have some available space.
 	if len(c.errItems) != 0 {
-		fmt.Fprintf(os.Stderr, "[DEBUG] vfs cache reset: before redoing reset errItems = %v\n", c.errItems)
+		c.opt.Logger.Debugf("cache reset: before redoing reset errItems = %v", c.errItems)
 		for itemName := range c.errItems {
 			if retryItem, ok := c.item[itemName]; ok {
 				_, _, err := retryItem.Reset()
@@ -533,7 +533,7 @@ func (c *Cache) retryFailedResets() {
 				delete(c.errItems, itemName)
 			}
 		}
-		fmt.Fprintf(os.Stderr, "[DEBUG] vfs cache reset: after redoing reset errItems = %v\n", c.errItems)
+		c.opt.Logger.Debugf("cache reset: after redoing reset errItems = %v", c.errItems)
 	}
 }
 
@@ -566,12 +566,12 @@ func (c *Cache) purgeClean() {
 		// The item space might be freed even if we get an error after the cache file is removed
 		// The item will not be removed or reset if the cache data is dirty (DataDirty)
 		c.used -= spaceFreed
-		fmt.Fprintf(os.Stderr, "[INFO] vfs cache purgeClean item.Reset %s: %s, freed %d bytes\n", item.GetName(), resetResult.String(), spaceFreed)
+		c.opt.Logger.Infof("cache purgeClean item.Reset %s: %s, freed %d bytes", item.GetName(), resetResult.String(), spaceFreed)
 		if resetResult == RemovedNotInUse {
 			delete(c.item, item.name)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[ERROR] vfs cache purgeClean item.Reset %s reset failed, err = %v, freed %d bytes\n", item.GetName(), err, spaceFreed)
+			c.opt.Logger.Errorf("cache purgeClean item.Reset %s reset failed, err = %v, freed %d bytes", item.GetName(), err, spaceFreed)
 			c.errItems[item.name] = err
 		}
 	}
@@ -658,7 +658,7 @@ func (c *Cache) minFreeSpaceQuotaOK() bool {
 	}
 	_, _, avail, err := getDiskUsage(c.root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] vfs cache: disk usage returned error: %v\n", err)
+		c.opt.Logger.Errorf("cache: disk usage returned error: %v", err)
 		return true
 	}
 	return avail >= c.opt.CacheMinFreeSpace
@@ -766,7 +766,7 @@ func (c *Cache) clean(kicked bool) {
 
 	stats := fmt.Sprintf("objects %d (was %d) in use %d, to upload %d, uploading %d, total size %d (was %d)",
 		newItems, oldItems, totalInUse, uploadsQueued, uploadsInProgress, newUsed, oldUsed)
-	fmt.Fprintf(os.Stderr, "[INFO] vfs cache: cleaned: %s\n", stats)
+	c.opt.Logger.Infof("cache: cleaned: %s", stats)
 }
 
 // cleaner calls clean at regular intervals and upon being kicked for out-of-space condition
@@ -774,7 +774,7 @@ func (c *Cache) clean(kicked bool) {
 // doesn't return until context is cancelled
 func (c *Cache) cleaner(ctx context.Context) {
 	if c.opt.CachePollInterval <= 0 {
-		fmt.Fprintf(os.Stderr, "[DEBUG] vfs cache: cleaning thread disabled because poll interval <= 0\n")
+		c.opt.Logger.Debugf("cache: cleaning thread disabled because poll interval <= 0")
 		return
 	}
 	// Start cleaning the cache immediately
@@ -789,7 +789,7 @@ func (c *Cache) cleaner(ctx context.Context) {
 		case <-timer.C:
 			c.clean(false) // timer driven cache poll, kicked is false
 		case <-ctx.Done():
-			fmt.Fprintf(os.Stderr, "[DEBUG] vfs cache: cleaner exiting\n")
+			c.opt.Logger.Debugf("cache: cleaner exiting")
 			return
 		}
 	}
@@ -810,16 +810,16 @@ func (c *Cache) TotalInUse() (n int) {
 // Dump the cache into a string for debugging purposes
 func (c *Cache) Dump() string {
 	if c == nil {
-		return "Cache: <nil>\n"
+		return "Cache: <nil>"
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var out strings.Builder
-	out.WriteString("Cache{\n")
+	out.WriteString("Cache{")
 	for name, item := range c.item {
-		fmt.Fprintf(&out, "\t%q: %+v,\n", name, item)
+		fmt.Fprintf(&out, "\t%q: %+v,", name, item)
 	}
-	out.WriteString("}\n")
+	out.WriteString("}")
 	return out.String()
 }
 

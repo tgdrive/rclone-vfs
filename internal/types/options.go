@@ -44,6 +44,9 @@ type Options struct {
 	HandleCaching      time.Duration `config:"vfs_handle_caching"`     // time to keep handle alive after last close
 	CacheDir           string        `config:"cache_dir"`              // path to the cache directory on local disk
 	MetadataExtension  string        `config:"vfs_metadata_extension"` // if set respond to files with this extension with metadata
+
+	// Logger is the logging backend. If nil, all log output is suppressed.
+	Logger Logger
 }
 
 // Opt is the default options modified by the environment variables and command line flags
@@ -70,6 +73,11 @@ var Opt = Options{
 
 // Init the options, making sure everything is within range
 func (opt *Options) Init() {
+	// Set default logger if none provided
+	if opt.Logger == nil {
+		opt.Logger = NopLogger()
+	}
+
 	// Mask the permissions with the umask
 	opt.DirPerms &= ^opt.Umask
 	opt.FilePerms &= ^opt.Umask

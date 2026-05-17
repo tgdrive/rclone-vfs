@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -121,7 +120,7 @@ func New(ctx context.Context, item Item, opt *types.Options, remote string, src 
 			case <-ticker.C:
 				err := dls.kickWaiters()
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "cache: failed to kick waiters: %v\n", err)
+					dls.opt.Logger.Infof("cache: failed to kick waiters: %v", err)
 				}
 			case <-ctx.Done():
 				return
@@ -143,7 +142,7 @@ func New(ctx context.Context, item Item, opt *types.Options, remote string, src 
 func (dls *Downloaders) _countErrors(n int64, err error) {
 	if err == nil && n != 0 {
 		if dls.errorCount != 0 {
-			fmt.Fprintf(os.Stderr, "cache: downloader: resetting error count to 0\n")
+			dls.opt.Logger.Infof("cache: downloader: resetting error count to 0")
 			dls.errorCount = 0
 			dls.lastErr = nil
 		}
@@ -154,7 +153,7 @@ func (dls *Downloaders) _countErrors(n int64, err error) {
 		dls.errorCount++
 		//}
 		dls.lastErr = err
-		fmt.Fprintf(os.Stderr, "cache: downloader: error count now %d: %v\n", dls.errorCount, err)
+		dls.opt.Logger.Infof("cache: downloader: error count now %d: %v", dls.errorCount, err)
 	}
 }
 
@@ -192,11 +191,11 @@ func (dls *Downloaders) _newDownloader(r ranges.Range) (dl *downloader, err erro
 		_ = dl.close(err)
 		dl.dls.countErrors(n, err)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "cache: failed to download: %v\n", err)
+			dls.opt.Logger.Infof("cache: failed to download: %v", err)
 		}
 		err = dl.dls.kickWaiters()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "cache: failed to kick waiters: %v\n", err)
+			dls.opt.Logger.Infof("cache: failed to kick waiters: %v", err)
 		}
 	})
 
@@ -420,17 +419,17 @@ func (dls *Downloaders) kickWaiters() (err error) {
 		err = dls._ensureDownloader(waiter.r)
 		if err != nil {
 			// Failures here will be retried by background kicker
-			fmt.Fprintf(os.Stderr, "cache: restart download failed: %v\n", err)
+			dls.opt.Logger.Infof("cache: restart download failed: %v", err)
 		}
 	}
 	if dls.lastErr != nil && strings.Contains(dls.lastErr.Error(), "no space") {
-		fmt.Fprintf(os.Stderr, "cache: cache is out of space %d/%d: last error: %v\n", dls.errorCount, maxErrorCount, dls.lastErr)
+		dls.opt.Logger.Infof("cache: cache is out of space %d/%d: last error: %v", dls.errorCount, maxErrorCount, dls.lastErr)
 		dls._closeWaiters(dls.lastErr)
 		return dls.lastErr
 	}
 
 	if dls.errorCount > maxErrorCount {
-		fmt.Fprintf(os.Stderr, "cache: too many errors %d/%d: last error: %v\n", dls.errorCount, maxErrorCount, dls.lastErr)
+		dls.opt.Logger.Infof("cache: too many errors %d/%d: last error: %v", dls.errorCount, maxErrorCount, dls.lastErr)
 		dls._closeWaiters(dls.lastErr)
 		return dls.lastErr
 	}
@@ -454,7 +453,7 @@ func (dl *downloader) Write(p []byte) (n int, err error) {
 			return
 		}
 		if waitErr := dl.dls.kickWaiters(); waitErr != nil {
-			fmt.Fprintf(os.Stderr, "cache: download write: failed to kick waiters: %v\n", waitErr)
+			dl.dls.opt.Logger.Infof("cache: download write: failed to kick waiters: %v", waitErr)
 			if err == nil {
 				err = waitErr
 			}
